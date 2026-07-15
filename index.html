@@ -1,75 +1,377 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=yes">
-    <title>CS HUB - AI Assistant</title>
-    <link rel="stylesheet" href="style.css">
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>CS Hub AI Terminal</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
 </head>
 <body>
-    <div class="chat-container">
-        <!-- ===== HEADER ===== -->
-        <div class="chat-header">
-            <div class="header-left">
-                <span class="ai-icon">🤖</span>
-                <div>
-                    <h1>AI Assistant</h1>
-                    <span class="subtitle">Powered by Knowledge Base</span>
-                </div>
-            </div>
-            <div class="header-right">
-                <button onclick="clearChat()" class="btn-clear" title="Clear Chat">🗑️</button>
-            </div>
-        </div>
 
-        <!-- ===== MESSAGES ===== -->
-        <div class="chat-messages" id="chatMessages">
-            <div class="welcome-message">
-                <div class="welcome-icon">🤖</div>
-                <h2 id="welcomeText">
-                    <span class="typing-cursor"></span>
-                </h2>
-            </div>
-        </div>
+<div class="app">
 
-        <!-- ===== TYPING INDICATOR ===== -->
-        <div class="typing-indicator" id="typingIndicator">
-            <span></span><span></span><span></span>
-        </div>
+  <header class="topbar">
+    <button class="icon-btn" id="menuBtn" aria-label="Menu">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+    </button>
+    <div class="title">
+      <span class="status-dot"></span>
+      <span>CS HUB AI TERMINAL</span>
+    </div>
+    <div class="clock" id="clock">00:00:00</div>
+  </header>
 
-        <!-- ===== INPUT AREA ===== -->
-        <div class="input-area">
-            <div class="input-wrapper">
-                <input type="text" id="chatInput" placeholder="Ask me anything..." onkeypress="if(event.key==='Enter') sendMessage()">
-                <div class="input-actions">
-                    <!-- Camera/Photo Upload -->
-                    <button class="btn-icon" id="cameraBtn" title="Take Photo or Upload Image">
-                        📷
-                        <input type="file" accept="image/*" capture="environment" onchange="uploadFile(this, 'image')">
-                    </button>
-                    <!-- File Upload -->
-                    <button class="btn-icon" id="fileBtn" title="Upload File">
-                        📎
-                        <input type="file" onchange="uploadFile(this, 'file')">
-                    </button>
-                    <!-- Voice Input -->
-                    <button class="btn-voice" id="voiceBtn" title="Voice Input" onclick="toggleVoice()">🎤</button>
-                    <!-- Send Button -->
-                    <button onclick="sendMessage()" class="btn-send">Send</button>
-                </div>
-            </div>
-        </div>
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-header">MENU</div>
+    <button class="sidebar-item" id="clearChatBtn">Clear Chat</button>
+    <button class="sidebar-item" id="closeSidebarBtn">Close Menu</button>
+  </aside>
+  <div class="sidebar-overlay" id="sidebarOverlay"></div>
+
+  <main class="chat-area" id="chatArea">
+    <div class="terminal-box" id="bootBox">
+      <p>&gt; Initializing CS Hub AI System...</p>
+      <p>&gt; Connecting to Knowledge Base...</p>
+      <p>&gt; Loading Neural Modules...</p>
+      <p>&gt; Verifying System Integrity...</p>
+      <p>&gt; AI Online. You can start asking questions.</p>
     </div>
 
-    <!-- ===== TOAST NOTIFICATION ===== -->
-    <div class="toast" id="toast"></div>
+    <div id="messages"></div>
+  </main>
 
-    <!-- ===== SCRIPTS ===== -->
-    <script src="ai/ai-engine.js"></script>
-    <script src="ai/search.js"></script>
-    <script src="ai/ranking.js"></script>
-    <script src="ai/memory.js"></script>
-    <script src="ai/response.js"></script>
-    <script src="script.js"></script>
+  <div class="attachment-preview" id="attachmentPreview"></div>
+
+  <footer class="input-bar">
+    <input type="file" id="fileInput" accept="image/*,.pdf,.doc,.docx,.txt" multiple hidden>
+    <button class="icon-btn attach-btn" id="attachBtn" aria-label="Attach file">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a5 5 0 01-7.07-7.07l9.19-9.19a3.5 3.5 0 014.95 4.95l-9.2 9.19a1.5 1.5 0 01-2.12-2.12l8.49-8.48"/></svg>
+    </button>
+    <input type="text" id="messageInput" placeholder="Type your message..." autocomplete="off">
+    <button class="send-btn" id="sendBtn" aria-label="Send message">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M2 21l21-9L2 3v7l15 2-15 2z"/></svg>
+    </button>
+  </footer>
+
+</div>
+
+<script>
+/* ---------- Clock ---------- */
+function updateClock() {
+  const now = new Date();
+  const h = String(now.getHours()).padStart(2, '0');
+  const m = String(now.getMinutes()).padStart(2, '0');
+  const s = String(now.getSeconds()).padStart(2, '0');
+  document.getElementById('clock').textContent = `${h}:${m}:${s}`;
+}
+updateClock();
+setInterval(updateClock, 1000);
+
+function timeNow() {
+  const now = new Date();
+  const h = String(now.getHours()).padStart(2, '0');
+  const m = String(now.getMinutes()).padStart(2, '0');
+  const s = String(now.getSeconds()).padStart(2, '0');
+  return `${h}:${m}:${s}`;
+}
+
+/* ---------- Sidebar ---------- */
+const sidebar = document.getElementById('sidebar');
+const sidebarOverlay = document.getElementById('sidebarOverlay');
+document.getElementById('menuBtn').addEventListener('click', () => {
+  sidebar.classList.add('open');
+  sidebarOverlay.classList.add('open');
+});
+function closeSidebar() {
+  sidebar.classList.remove('open');
+  sidebarOverlay.classList.remove('open');
+}
+document.getElementById('closeSidebarBtn').addEventListener('click', closeSidebar);
+sidebarOverlay.addEventListener('click', closeSidebar);
+document.getElementById('clearChatBtn').addEventListener('click', () => {
+  document.getElementById('messages').innerHTML = '';
+  closeSidebar();
+});
+
+/* ---------- Chat elements ---------- */
+const chatArea = document.getElementById('chatArea');
+const messagesEl = document.getElementById('messages');
+const messageInput = document.getElementById('messageInput');
+const sendBtn = document.getElementById('sendBtn');
+const fileInput = document.getElementById('fileInput');
+const attachBtn = document.getElementById('attachBtn');
+const attachmentPreview = document.getElementById('attachmentPreview');
+
+let pendingAttachments = [];
+
+function scrollToBottom() {
+  chatArea.scrollTop = chatArea.scrollHeight;
+}
+
+/* ---------- Attachments ---------- */
+attachBtn.addEventListener('click', () => fileInput.click());
+
+fileInput.addEventListener('change', () => {
+  Array.from(fileInput.files).forEach(file => {
+    const reader = new FileReader();
+    reader.onload = e => {
+      pendingAttachments.push({
+        name: file.name,
+        type: file.type,
+        dataUrl: e.target.result
+      });
+      renderAttachmentPreview();
+    };
+    reader.readAsDataURL(file);
+  });
+  fileInput.value = '';
+});
+
+function renderAttachmentPreview() {
+  attachmentPreview.innerHTML = '';
+  if (pendingAttachments.length === 0) {
+    attachmentPreview.classList.remove('active');
+    return;
+  }
+  attachmentPreview.classList.add('active');
+  pendingAttachments.forEach((att, index) => {
+    const chip = document.createElement('div');
+    chip.className = 'attach-chip';
+    if (att.type.startsWith('image/')) {
+      chip.innerHTML = `<img src="${att.dataUrl}" alt="${att.name}">`;
+    } else {
+      chip.innerHTML = `
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6"/></svg>
+        <span class="attach-name">${att.name}</span>`;
+    }
+    const removeBtn = document.createElement('button');
+    removeBtn.className = 'attach-remove';
+    removeBtn.innerHTML = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><line x1="4" y1="4" x2="20" y2="20"/><line x1="20" y1="4" x2="4" y2="20"/></svg>`;
+    removeBtn.addEventListener('click', () => {
+      pendingAttachments.splice(index, 1);
+      renderAttachmentPreview();
+    });
+    chip.appendChild(removeBtn);
+    attachmentPreview.appendChild(chip);
+  });
+}
+
+/* ---------- Sending ---------- */
+sendBtn.addEventListener('click', sendMessage);
+messageInput.addEventListener('keydown', e => {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    sendMessage();
+  }
+});
+
+function sendMessage() {
+  const text = messageInput.value.trim();
+  if (!text && pendingAttachments.length === 0) return;
+
+  appendUserMessage(text, pendingAttachments);
+  const userText = text;
+  pendingAttachments = [];
+  renderAttachmentPreview();
+  messageInput.value = '';
+  scrollToBottom();
+
+  setTimeout(() => appendAIResponse(userText), 300);
+}
+
+function appendUserMessage(text, attachments) {
+  const block = document.createElement('div');
+  block.className = 'message-block';
+  block.innerHTML = `
+    <div class="message-header">
+      <span class="avatar user-avatar">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M12 12c2.7 0 4.9-2.2 4.9-4.9S14.7 2.2 12 2.2 7.1 4.4 7.1 7.1 9.3 12 12 12zm0 2.5c-3.3 0-9.8 1.6-9.8 4.9v2.4h19.6v-2.4c0-3.3-6.5-4.9-9.8-4.9z"/></svg>
+      </span>
+      <span class="sender-name">You</span>
+      <span class="timestamp">${timeNow()}</span>
+    </div>
+    <div class="message-content"></div>
+  `;
+  const content = block.querySelector('.message-content');
+  if (text) {
+    const p = document.createElement('p');
+    p.textContent = text;
+    content.appendChild(p);
+  }
+  attachments.forEach(att => {
+    if (att.type.startsWith('image/')) {
+      const img = document.createElement('img');
+      img.src = att.dataUrl;
+      img.className = 'message-image';
+      content.appendChild(img);
+    } else {
+      const fileChip = document.createElement('div');
+      fileChip.className = 'message-file';
+      fileChip.innerHTML = `
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6"/></svg>
+        <span>${att.name}</span>`;
+      content.appendChild(fileChip);
+    }
+  });
+  messagesEl.appendChild(block);
+}
+
+/* ---------- AI response ---------- */
+const knowledgeBase = [
+  { keys: ['binary tree'], response:
+`A binary tree is a hierarchical data structure in which each node
+has at most two children, referred to as the left child and the right child.
+
+Key properties:
+> - Each node has at most two children.
+> - The left subtree contains values less than the parent node.
+> - The right subtree contains values greater than the parent node.
+> - It is widely used in searching, sorting, and hierarchical data representation.` },
+
+  { keys: ['linked list'], response:
+`A linked list is a linear data structure where elements (nodes) are
+stored in sequence, and each node points to the next one.
+
+Key properties:
+> - Nodes are not stored in contiguous memory.
+> - Each node holds data plus a pointer to the next node.
+> - Insertion and deletion are efficient compared to arrays.
+> - Common variants: singly linked, doubly linked, circular linked lists.` },
+
+  { keys: ['stack'], response:
+`A stack is a linear data structure that follows the LIFO
+(Last In, First Out) principle.
+
+Key properties:
+> - Elements are added and removed from the same end (the top).
+> - Core operations: push, pop, peek.
+> - Used in function call management, undo operations, and expression parsing.` },
+
+  { keys: ['queue'], response:
+`A queue is a linear data structure that follows the FIFO
+(First In, First Out) principle.
+
+Key properties:
+> - Elements are added at the rear and removed from the front.
+> - Core operations: enqueue, dequeue, peek.
+> - Used in scheduling, buffering, and breadth-first traversal.` },
+
+  { keys: ['array'], response:
+`An array is a collection of elements stored at contiguous memory
+locations, each identified by an index.
+
+Key properties:
+> - Fixed size in most statically typed languages.
+> - Constant time access by index: O(1).
+> - Insertion/deletion in the middle is O(n) due to shifting elements.` },
+
+  { keys: ['recursion'], response:
+`Recursion is a technique where a function calls itself to solve
+smaller instances of the same problem.
+
+Key properties:
+> - Requires a base case to stop the recursive calls.
+> - Each call is added to the call stack until the base case is reached.
+> - Common in tree/graph traversal, divide-and-conquer algorithms.` },
+
+  { keys: ['big o', 'complexity'], response:
+`Big O notation describes how an algorithm's runtime or memory
+usage grows as the input size increases.
+
+Common complexities:
+> - O(1): constant time
+> - O(log n): logarithmic time
+> - O(n): linear time
+> - O(n log n): linearithmic time
+> - O(n^2): quadratic time` },
+
+  { keys: ['oop', 'object oriented'], response:
+`Object-Oriented Programming (OOP) is a paradigm based on organizing
+code around objects that bundle data and behavior.
+
+Core principles:
+> - Encapsulation: bundling data with the methods that operate on it.
+> - Inheritance: sharing behavior between classes.
+> - Polymorphism: same interface, different implementations.
+> - Abstraction: hiding implementation details.` }
+];
+
+function findResponse(userText) {
+  const lower = userText.toLowerCase();
+  for (const entry of knowledgeBase) {
+    if (entry.keys.some(key => lower.includes(key))) {
+      return entry.response;
+    }
+  }
+  return `I don't have a specific entry for that yet in my knowledge base.
+Try asking about a core CS topic such as:
+> - binary tree
+> - linked list
+> - stack / queue
+> - recursion
+> - Big O complexity
+> - OOP principles`;
+}
+
+function appendAIResponse(userText) {
+  const block = document.createElement('div');
+  block.className = 'message-block';
+  block.innerHTML = `
+    <div class="message-header">
+      <span class="avatar ai-avatar">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.5 4 5.6 4 9s-1.5 6.5-4 9c-2.5-2.5-4-5.6-4-9s1.5-6.5 4-9z"/></svg>
+      </span>
+      <span class="sender-name">CS HUB AI</span>
+      <span class="timestamp">${timeNow()}</span>
+    </div>
+    <div class="message-content">
+      <div class="ai-loading"></div>
+      <pre class="ai-answer"></pre>
+    </div>
+  `;
+  messagesEl.appendChild(block);
+  scrollToBottom();
+
+  const loadingEl = block.querySelector('.ai-loading');
+  const answerEl = block.querySelector('.ai-answer');
+  const loadingLines = [
+    '> Searching knowledge base...',
+    '> Analyzing relevant documents...',
+    '> Generating response...'
+  ];
+
+  let i = 0;
+  function showNextLine() {
+    if (i < loadingLines.length) {
+      const p = document.createElement('p');
+      p.textContent = loadingLines[i];
+      p.className = 'loading-line';
+      loadingEl.appendChild(p);
+      scrollToBottom();
+      i++;
+      setTimeout(showNextLine, 400);
+    } else {
+      setTimeout(() => typeWriter(answerEl, findResponse(userText)), 200);
+    }
+  }
+  showNextLine();
+}
+
+function typeWriter(el, text, speed = 12) {
+  let index = 0;
+  function tick() {
+    if (index < text.length) {
+      el.textContent += text.charAt(index);
+      index++;
+      scrollToBottom();
+      setTimeout(tick, speed);
+    }
+  }
+  tick();
+}
+</script>
+
 </body>
 </html>
