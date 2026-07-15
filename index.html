@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=yes">
+    <title>CS HUB - AI Assistant</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="chat-container">
+        <!-- ===== HEADER ===== -->
+        <div class="chat-header">
+            <div class="header-left">
+                <span class="ai-icon">🤖</span>
+                <div>
+                    <h1>AI Assistant</h1>
+                    <span class="subtitle">Powered by Knowledge Base</span>
+                </div>
+            </div>
+            <div class="header-right">
+                <button onclick="clearChat()" class="btn-clear" title="Clear Chat">🗑️</button>
+            </div>
+        </div>
+
+        <!-- ===== MESSAGES ===== -->
+        <div class="chat-messages" id="chatMessages">
+            <div class="welcome-message">
+                <div class="welcome-icon">🤖</div>
+                <h2>How can I help you?</h2>
+                <p>Ask me anything, upload a photo, or use voice input.</p>
+                <div class="knowledge-tags">
+                    <span class="tag">💻 Computer Science</span>
+                    <span class="tag">📚 Programming</span>
+                    <span class="tag">📐 Mathematics</span>
+                    <span class="tag">🎓 University Notes</span>
+                    <span class="tag">📖 General Knowledge</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- ===== TYPING INDICATOR ===== -->
+        <div class="typing-indicator" id="typingIndicator">
+            <span></span><span></span><span></span>
+        </div>
+
+        <!-- ===== INPUT AREA ===== -->
+        <div class="input-area">
+            <div class="input-wrapper">
+                <input type="text" id="chatInput" placeholder="Ask me anything..." onkeypress="if(event.key==='Enter') sendMessage()">
+                <div class="input-actions">
+                    <!-- Camera/Photo Upload -->
+                    <button class="btn-icon" title="Take Photo or Upload Image">
+                        📷
+                        <input type="file" accept="image/*" capture="environment" onchange="uploadFile(this, 'image')">
+                    </button>
+                    <!-- File Upload -->
+                    <button class="btn-icon" title="Upload File">
+                        📎
+                        <input type="file" onchange="uploadFile(this, 'file')">
+                    </button>
+                    <!-- Voice Input -->
+                    <button class="btn-voice" id="voiceBtn" title="Voice Input" onclick="toggleVoice()">🎤</button>
+                    <!-- Send Button -->
+                    <button onclick="sendMessage()" class="btn-send">Send</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ===== TOAST NOTIFICATION ===== -->
+    <div class="toast" id="toast"></div>
+
+    <!-- ===== SCRIPTS ===== -->
+    <script src="ai/ai-engine.js"></script>
+    <script src="ai/search.js"></script>
+    <script src="ai/ranking.js"></script>
+    <script src="ai/memory.js"></script>
+    <script src="ai/response.js"></script>
+    <script src="script.js"></script>
+</body>
+</html>
