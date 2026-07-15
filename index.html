@@ -26,15 +26,9 @@
         <div class="chat-messages" id="chatMessages">
             <div class="welcome-message">
                 <div class="welcome-icon">🤖</div>
-                <h2>How can I help you?</h2>
-                <p>Ask me anything, upload a photo, or use voice input.</p>
-                <div class="knowledge-tags">
-                    <span class="tag">💻 Computer Science</span>
-                    <span class="tag">📚 Programming</span>
-                    <span class="tag">📐 Mathematics</span>
-                    <span class="tag">🎓 University Notes</span>
-                    <span class="tag">📖 General Knowledge</span>
-                </div>
+                <h2 id="welcomeText">
+                    <span class="typing-cursor"></span>
+                </h2>
             </div>
         </div>
 
@@ -49,12 +43,12 @@
                 <input type="text" id="chatInput" placeholder="Ask me anything..." onkeypress="if(event.key==='Enter') sendMessage()">
                 <div class="input-actions">
                     <!-- Camera/Photo Upload -->
-                    <button class="btn-icon" title="Take Photo or Upload Image">
+                    <button class="btn-icon" id="cameraBtn" title="Take Photo or Upload Image">
                         📷
                         <input type="file" accept="image/*" capture="environment" onchange="uploadFile(this, 'image')">
                     </button>
                     <!-- File Upload -->
-                    <button class="btn-icon" title="Upload File">
+                    <button class="btn-icon" id="fileBtn" title="Upload File">
                         📎
                         <input type="file" onchange="uploadFile(this, 'file')">
                     </button>
