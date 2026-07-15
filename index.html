@@ -32,11 +32,15 @@
 
   <main class="chat-area" id="chatArea">
     <div class="terminal-box" id="bootBox">
-      <p>&gt; Initializing CS Hub AI System...</p>
-      <p>&gt; Connecting to Knowledge Base...</p>
-      <p>&gt; Loading Neural Modules...</p>
-      <p>&gt; Verifying System Integrity...</p>
-      <p>&gt; AI Online. You can start asking questions.</p>
+      <p id="bootLine0" class="boot-line"></p>
+      <p id="bootLine1" class="boot-line"></p>
+      <p id="bootLine2" class="boot-line"></p>
+      <p id="bootLine3" class="boot-line"></p>
+      <p id="bootLine4" class="boot-line"></p>
+    </div>
+
+    <div class="terminal-box welcome-box" id="welcomeBox" style="display:none;">
+      <p id="welcomeLine" class="boot-line"></p>
     </div>
 
     <div id="messages"></div>
@@ -91,7 +95,8 @@ function closeSidebar() {
 document.getElementById('closeSidebarBtn').addEventListener('click', closeSidebar);
 sidebarOverlay.addEventListener('click', closeSidebar);
 document.getElementById('clearChatBtn').addEventListener('click', () => {
-  document.getElementById('messages').innerHTML = '';
+  messagesEl.innerHTML = '';
+  localStorage.removeItem('cshub_chat_history');
   closeSidebar();
 });
 
@@ -105,9 +110,82 @@ const attachBtn = document.getElementById('attachBtn');
 const attachmentPreview = document.getElementById('attachmentPreview');
 
 let pendingAttachments = [];
+const STORAGE_KEY = 'cshub_chat_history';
 
 function scrollToBottom() {
   chatArea.scrollTop = chatArea.scrollHeight;
+}
+
+/* ---------- Boot sequence typing animation ---------- */
+const bootLines = [
+  '> Initializing CS Hub AI System...',
+  '> Connecting to Knowledge Base...',
+  '> Loading Neural Modules...',
+  '> Verifying System Integrity...',
+  '> AI Online. You can start asking questions.'
+];
+
+function typeLine(el, text, speed, callback) {
+  let i = 0;
+  el.textContent = '';
+  el.classList.add('typing-cursor');
+  function tick() {
+    if (i < text.length) {
+      el.textContent += text.charAt(i);
+      i++;
+      setTimeout(tick, speed);
+    } else {
+      el.classList.remove('typing-cursor');
+      if (callback) setTimeout(callback, 250);
+    }
+  }
+  tick();
+}
+
+function runBootSequence(onDone) {
+  let index = 0;
+  function nextLine() {
+    if (index < bootLines.length) {
+      const el = document.getElementById('bootLine' + index);
+      typeLine(el, bootLines[index], 18, () => {
+        index++;
+        nextLine();
+      });
+    } else {
+      setTimeout(onDone, 500);
+    }
+  }
+  nextLine();
+}
+
+function showWelcome() {
+  const bootBox = document.getElementById('bootBox');
+  bootBox.classList.add('fade-out');
+  setTimeout(() => {
+    bootBox.style.display = 'none';
+    const welcomeBox = document.getElementById('welcomeBox');
+    welcomeBox.style.display = 'block';
+    welcomeBox.classList.add('fade-in');
+    const welcomeEl = document.getElementById('welcomeLine');
+    typeLine(welcomeEl, '> Welcome back. How can I help you today?', 22, () => {
+      loadChatHistory();
+    });
+  }, 600);
+}
+
+runBootSequence(showWelcome);
+
+/* ---------- Chat persistence ---------- */
+function saveChatHistory() {
+  localStorage.setItem(STORAGE_KEY, messagesEl.innerHTML);
+}
+
+function loadChatHistory() {
+  const saved = localStorage.getItem(STORAGE_KEY);
+  if (saved) {
+    messagesEl.innerHTML = saved;
+    scrollToBottom();
+  }
 }
 
 /* ---------- Attachments ---------- */
@@ -177,6 +255,7 @@ function sendMessage() {
   renderAttachmentPreview();
   messageInput.value = '';
   scrollToBottom();
+  saveChatHistory();
 
   setTimeout(() => appendAIResponse(userText), 300);
 }
@@ -353,13 +432,13 @@ function appendAIResponse(userText) {
       i++;
       setTimeout(showNextLine, 400);
     } else {
-      setTimeout(() => typeWriter(answerEl, findResponse(userText)), 200);
+      setTimeout(() => typeWriter(answerEl, findResponse(userText), 12, saveChatHistory), 200);
     }
   }
   showNextLine();
 }
 
-function typeWriter(el, text, speed = 12) {
+function typeWriter(el, text, speed, onDone) {
   let index = 0;
   function tick() {
     if (index < text.length) {
@@ -367,6 +446,8 @@ function typeWriter(el, text, speed = 12) {
       index++;
       scrollToBottom();
       setTimeout(tick, speed);
+    } else if (onDone) {
+      onDone();
     }
   }
   tick();
