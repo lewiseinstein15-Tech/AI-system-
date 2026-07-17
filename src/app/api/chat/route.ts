@@ -32,30 +32,25 @@ export async function POST(req: Request) {
       });
     }
 
-    // --- LIVE INTERNET FETCH (Wikipedia - No API Key Needed) ---
-    // 1. Search Wikipedia for the topic
-    const searchRes = await fetch(`https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(userPrompt)}&format=json&origin=*`);
-    const searchData = await searchRes.json();
+    // --- SMART AI (Pollinations.ai - No API Key Needed) ---
+    // We send the prompt to Pollinations, which uses a real LLM to generate a smart answer
+    const systemPrompt = "You are Computer Science Hub AI, an elite assistant for CS students. Provide accurate, well-formatted markdown responses with syntax highlighting. Focus on programming, math, algorithms, and computer science principles. If asked to write code, write the code.";
     
-    let fetchedText = "I searched the live internet but couldn't find a direct answer for that. Could you try rephrasing? (Example: 'Explain Binary Trees')";
-
-    if (searchData.query && searchData.query.search.length > 0) {
-      const topTitle = searchData.query.search[0].title;
-      
-      // 2. Get the summary of the top article
-      const summaryRes = await fetch(`https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(topTitle)}`);
-      const summaryData = await summaryRes.json();
-      
-      if (summaryData.extract) {
-        fetchedText = `Here is what I found on the live internet regarding **${topTitle}**:\n\n${summaryData.extract}\n\n*(Source: Wikipedia Live API)*`;
-      }
+    // Encode the prompt for the URL
+    const encodedPrompt = encodeURIComponent(systemPrompt + "\n\nUser: " + userPrompt + "\nAI:");
+    
+    const aiRes = await fetch(`https://text.pollinations.ai/${encodedPrompt}`);
+    
+    let aiText = "I couldn't connect to the AI brain right now. Please try again.";
+    if (aiRes.ok) {
+      aiText = await aiRes.text();
     }
 
-    // 3. Stream the live data to the UI (typing effect)
+    // Stream the smart response to the UI (typing effect)
     const encoder = new TextEncoder();
     const customStream = new ReadableStream({
       async start(controller) {
-        const words = fetchedText.split(' ');
+        const words = aiText.split(' ');
         for (const word of words) {
           const token = JSON.stringify({ choices: [{ delta: { content: word + ' ' } }] });
           controller.enqueue(encoder.encode(`data: ${token}\n\n`));
@@ -64,12 +59,12 @@ export async function POST(req: Request) {
         controller.enqueue(encoder.encode('data: [DONE]\n\n'));
         controller.close();
 
-        // Save the live answer to the database
+        // Save the smart answer to the database
         await prisma.message.create({
           data: {
             conversationId: currentConvId,
             role: "assistant",
-            content: fetchedText,
+            content: aiText,
           },
         });
         await prisma.conversation.update({
