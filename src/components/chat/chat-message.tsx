@@ -5,14 +5,40 @@ import { User, Bot } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { vscDarkPlus } from "react-syntax-highlighter/dist/esm/styles/prism";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Check, Copy } from "lucide-react";
+import remarkGfm from "remark-gfm";
 
 interface ChatMessageProps {
   role: "user" | "assistant" | "system";
   content: string;
   isStreaming?: boolean;
 }
+
+// Helper component to render Mermaid diagrams
+const MermaidRenderer = ({ code }: { code: string }) => {
+  const [svg, setSvg] = useState<string | null>(null);
+
+  useEffect(() => {
+    const fetchDiagram = async () => {
+      try {
+        const res = await fetch(`https://mermaid.ink/svg/${btoa(code)}`);
+        if (res.ok) {
+          const text = await res.text();
+          setSvg(text);
+        }
+      } catch (e) {
+        console.error("Failed to render diagram");
+      }
+    };
+    fetchDiagram();
+  }, [code]);
+
+  if (svg) {
+    return <div className="my-4 flex justify-center bg-white p-4 rounded-lg overflow-x-auto" dangerouslySetInnerHTML={{ __html: svg }} />;
+  }
+  return <pre className="my-4 p-4 bg-accent rounded-lg overflow-x-auto"><code>{code}</code></pre>;
+};
 
 export function ChatMessage({ role, content, isStreaming }: ChatMessageProps) {
   const [copied, setCopied] = useState(false);
@@ -53,41 +79,69 @@ export function ChatMessage({ role, content, isStreaming }: ChatMessageProps) {
         </div>
         <div
           className={cn(
-            "prose prose-invert max-w-none text-sm leading-relaxed font-mono", // Added font-mono here!
+            "prose prose-invert max-w-none text-sm leading-relaxed font-mono break-words",
             isStreaming && "typing-cursor"
           )}
         >
           <ReactMarkdown
+            remarkPlugins={[remarkGfm]}
             components={{
               code({ node, inline, className, children, ...props }) {
                 const match = /language-(\w+)/.exec(className || "");
-                return !inline && match ? (
-                  <div className="my-4 overflow-hidden rounded-md border border-border bg-accent/50">
-                    <div className="flex items-center justify-between border-b border-border px-4 py-2 text-xs text-foreground/60 font-mono">
-                      <span>{match[1]}</span>
-                      <button
-                        onClick={() => navigator.clipboard.writeText(String(children))}
-                        className="hover:text-primary font-mono"
+                const codeString = String(children).replace(/\n$/, "");
+                
+                // Render Mermaid diagrams visually
+                if (match && match[1] === "mermaid") {
+                  return <MermaidRenderer code={codeString} />;
+                }
+
+                // Render Code blocks
+                if (!inline && match) {
+                  return (
+                    <div className="my-4 overflow-hidden rounded-md border border-border bg-accent/50">
+                      <div className="flex items-center justify-between border-b border-border px-4 py-2 text-xs text-foreground/60 font-mono">
+                        <span>{match[1]}</span>
+                        <button
+                          onClick={() => navigator.clipboard.writeText(codeString)}
+                          className="hover:text-primary font-mono"
+                        >
+                          Copy code
+                        </button>
+                      </div>
+                      <SyntaxHighlighter
+                        style={vscDarkPlus}
+                        language={match[1]}
+                        PreTag="div"
+                        className="!bg-transparent !text-sm font-mono"
+                        {...props}
                       >
-                        Copy code
-                      </button>
+                        {codeString}
+                      </SyntaxHighlighter>
                     </div>
-                    <SyntaxHighlighter
-                      style={vscDarkPlus}
-                      language={match[1]}
-                      PreTag="div"
-                      className="!bg-transparent !text-sm font-mono"
-                      {...props}
-                    >
-                      {String(children).replace(/\n$/, "")}
-                    </SyntaxHighlighter>
-                  </div>
-                ) : (
+                  );
+                }
+                
+                // Render inline code
+                return (
                   <code className="rounded bg-accent px-1 py-0.5 text-primary font-mono" {...props}>
                     {children}
                   </code>
                 );
               },
+              // Make images responsive and render AI generated images
+              img({ node, ...props }) {
+                return <img alt="AI Generated" className="max-w-full h-auto rounded-lg my-4 border border-border" {...props} />;
+              },
+              // Make tables scrollable on mobile so they don't break the screen
+              table({ node, ...props }) {
+                return <div className="overflow-x-auto my-4"><table className="min-w-full border-collapse border border-border" {...props} /></div>;
+              },
+              th({ node, ...props }) {
+                return <th className="border border-border p-2 text-left bg-accent" {...props} />;
+              },
+              td({ node, ...props }) {
+                return <td className="border border-border p-2" {...props} />;
+              }
             }}
           >
             {content}
