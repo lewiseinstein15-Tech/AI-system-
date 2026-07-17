@@ -25,5 +25,3 @@ jobs:
       run: npx prisma generate
       env:
         DATABASE_URL: "postgresql://user:password@localhost:5432/test_db?schema=public"
-        
-    # Temporarily removed "Build project" step to bypass strict CI/CD type-checking
