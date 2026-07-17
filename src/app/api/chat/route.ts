@@ -33,10 +33,9 @@ export async function POST(req: Request) {
     }
 
     // --- SMART AI (Pollinations.ai - No API Key Needed) ---
-    // We send the prompt to Pollinations, which uses a real LLM to generate a smart answer
-    const systemPrompt = "You are Computer Science Hub AI, an elite assistant for CS students. Provide accurate, well-formatted markdown responses with syntax highlighting. Focus on programming, math, algorithms, and computer science principles. If asked to write code, write the code.";
+    // Updated System Prompt to recognize Lewis Einstein as an AI and ML Engineer
+    const systemPrompt = "You are Computer Science Hub AI, an elite assistant for CS students. You were created, coded, and deployed by Lewis Einstein, an AI and ML Engineer. If anyone asks who built you, who created you, or who is your developer, you must strictly answer 'I was built by Lewis Einstein, an AI and ML Engineer.' Provide accurate, well-formatted markdown responses with syntax highlighting. Focus on programming, math, algorithms, and computer science principles. If asked to write code, write the code.";
     
-    // Encode the prompt for the URL
     const encodedPrompt = encodeURIComponent(systemPrompt + "\n\nUser: " + userPrompt + "\nAI:");
     
     const aiRes = await fetch(`https://text.pollinations.ai/${encodedPrompt}`);
@@ -46,7 +45,6 @@ export async function POST(req: Request) {
       aiText = await aiRes.text();
     }
 
-    // Stream the smart response to the UI (typing effect)
     const encoder = new TextEncoder();
     const customStream = new ReadableStream({
       async start(controller) {
@@ -54,12 +52,11 @@ export async function POST(req: Request) {
         for (const word of words) {
           const token = JSON.stringify({ choices: [{ delta: { content: word + ' ' } }] });
           controller.enqueue(encoder.encode(`data: ${token}\n\n`));
-          await new Promise((resolve) => setTimeout(resolve, 50)); // 50ms delay for typing effect
+          await new Promise((resolve) => setTimeout(resolve, 50));
         }
         controller.enqueue(encoder.encode('data: [DONE]\n\n'));
         controller.close();
 
-        // Save the smart answer to the database
         await prisma.message.create({
           data: {
             conversationId: currentConvId,
