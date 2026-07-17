@@ -10,7 +10,7 @@
     "postinstall": "prisma generate"
   },
   "dependencies": {
-    "@ai-sdk/openai": "^0.0.10",
+    "@ai-sdk/google": "^0.0.10",
     "@auth/prisma-adapter": "^1.0.0",
     "@prisma/client": "^5.0.0",
     "@radix-ui/react-avatar": "^1.0.0",
