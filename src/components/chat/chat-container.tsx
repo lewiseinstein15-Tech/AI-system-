@@ -6,7 +6,7 @@ import { ChatMessage } from "./chat-message";
 import { ChatInput } from "./chat-input";
 import { useRouter } from "next/navigation";
 import { useSession } from "next-auth/react";
-import { Menu, X } from "lucide-react";
+import { Menu, X, Bot } from "lucide-react";
 
 interface Message {
   role: "user" | "assistant" | "system";
@@ -21,27 +21,21 @@ export function ChatContainer() {
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  
-  // State for the typing welcome message
   const [typedWelcome, setTypedWelcome] = useState("");
 
   useEffect(() => {
-    if (status === "unauthenticated") {
-      router.push("/login");
-    }
+    if (status === "unauthenticated") router.push("/login");
   }, [status, router]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  // Typing effect for the welcome message
   useEffect(() => {
     if (status === "authenticated" && session?.user) {
       const role = session.user.role === "ADMIN" ? "Admin" : "";
       const name = session.user.name || "User";
       const fullText = `Welcome back, ${role} ${name}...`;
-      
       let index = 0;
       const timer = setInterval(() => {
         if (index < fullText.length) {
@@ -50,7 +44,7 @@ export function ChatContainer() {
         } else {
           clearInterval(timer);
         }
-      }, 50); // 50ms typing speed
+      }, 50);
       return () => clearInterval(timer);
     }
   }, [status, session]);
@@ -66,10 +60,7 @@ export function ChatContainer() {
       const response = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          messages: [...messages, newUserMessage],
-          conversationId,
-        }),
+        body: JSON.stringify({ messages: [...messages, newUserMessage], conversationId }),
       });
 
       if (!response.ok) throw new Error("API Error");
@@ -99,24 +90,16 @@ export function ChatContainer() {
               assistantContent += token;
               setMessages((prev) => {
                 const newMessages = [...prev];
-                newMessages[newMessages.length - 1] = {
-                  role: "assistant",
-                  content: assistantContent,
-                };
+                newMessages[newMessages.length - 1] = { role: "assistant", content: assistantContent };
                 return newMessages;
               });
             }
-          } catch (e) {
-            // Ignore JSON parse errors
-          }
+          } catch (e) {}
         }
       }
     } catch (error) {
       console.error("Chat Error:", error);
-      setMessages((prev) => [
-        ...prev,
-        { role: "assistant", content: "Error: Unable to fetch response." },
-      ]);
+      setMessages((prev) => [...prev, { role: "assistant", content: "Error: Unable to fetch response." }]);
     } finally {
       setIsStreaming(false);
     }
@@ -139,9 +122,7 @@ export function ChatContainer() {
   }
 
   return (
-    // Changed bg-background to bg-transparent so the grid shows!
     <div className="flex h-screen overflow-hidden bg-transparent text-foreground">
-      {/* Mobile Sidebar Overlay */}
       {mobileSidebarOpen && (
         <div className="fixed inset-0 z-30 bg-black/50 md:hidden" onClick={() => setMobileSidebarOpen(false)} />
       )}
@@ -155,7 +136,7 @@ export function ChatContainer() {
           <button onClick={() => setMobileSidebarOpen(!mobileSidebarOpen)}>
             {mobileSidebarOpen ? <X className="h-6 w-6 text-primary" /> : <Menu className="h-6 w-6 text-primary" />}
           </button>
-          <h1 className="text-lg font-bold text-primary">CS Hub AI</h1>
+          <h1 className="text-lg font-bold text-primary font-mono">CS Hub AI</h1>
           <div className="w-6"></div>
         </header>
         
@@ -166,21 +147,41 @@ export function ChatContainer() {
                 <div className="rounded-full bg-primary/10 p-4">
                   <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#39FF14" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/></svg>
                 </div>
-                <h2 className="text-2xl font-bold">Computer Science Hub AI</h2>
-                {/* Typing Welcome Message */}
-                <p className="max-w-md text-primary/80 typing-cursor h-6 font-mono">
-                  {typedWelcome}
-                </p>
+                <h2 className="text-2xl font-bold font-mono">Computer Science Hub AI</h2>
+                <p className="max-w-md text-primary/80 typing-cursor h-6 font-mono">{typedWelcome}</p>
               </div>
             ) : (
-              messages.map((msg, i) => (
-                <ChatMessage
-                  key={i}
-                  role={msg.role}
-                  content={msg.content}
-                  isStreaming={isStreaming && i === messages.length - 1 && msg.role === "assistant"}
-                />
-              ))
+              messages.map((msg, i) => {
+                // Show Thinking Animation if it's the AI's turn and content is still empty
+                const isThinking = isStreaming && i === messages.length - 1 && msg.role === "assistant" && msg.content === "";
+                
+                if (isThinking) {
+                  return (
+                    <div key={i} className="group flex gap-4 px-4 py-6 sm:px-6 bg-transparent">
+                      <div className="flex-shrink-0">
+                        <div className="flex h-8 w-8 items-center justify-center rounded-md border border-primary/30 bg-primary/10 text-primary">
+                          <Bot className="h-5 w-5" />
+                        </div>
+                      </div>
+                      <div className="flex-1 overflow-hidden">
+                        <div className="mb-1 flex items-center gap-2">
+                          <span className="text-sm font-semibold font-mono">CS Hub AI</span>
+                        </div>
+                        <span className="text-sm font-mono text-foreground/50 animate-pulse">Thinking...</span>
+                      </div>
+                    </div>
+                  );
+                }
+
+                return (
+                  <ChatMessage
+                    key={i}
+                    role={msg.role}
+                    content={msg.content}
+                    isStreaming={isStreaming && i === messages.length - 1 && msg.role === "assistant"}
+                  />
+                );
+              })
             )}
             <div ref={messagesEndRef} />
           </div>
