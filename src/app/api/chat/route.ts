@@ -32,38 +32,37 @@ export async function POST(req: Request) {
       });
     }
 
-    // --- SMART AI WITH FULL MEMORY ---
-    const systemPrompt = `You are Computer Science Hub AI, an elite assistant for CS students. You were created, coded, and deployed by Lewis Einstein, an AI and ML Engineer. You are specifically designed for students at Kibabii University in Kenya. If anyone asks who built you, who created you, or who is your developer, you must strictly answer 'I was built by Lewis Einstein, an AI and ML Engineer.' Provide accurate, well-formatted markdown responses with syntax highlighting. Focus on programming, math, algorithms, and computer science principles. If asked to write code, write the code.
+    // --- AGENT SYSTEM PROMPT ---
+    const systemPrompt = `You are Computer Science Hub AI, an elite agent for CS students. You were created by Lewis Einstein, an AI and ML Engineer, for Kibabii University.
+    
+    You have TOOLS you can use. If you want to use a tool, your ENTIRE response must be ONLY the tool command, with no other text.
+    
+    TOOL 1: SAVE FLASHCARD
+    Format: [[ACTION:CREATE_FLASHCARD]] Front: <front text> | Back: <back text>
+    
+    TOOL 2: SAVE NOTE
+    Format: [[ACTION:SAVE_NOTE]] Title: <title text> | Content: <content text>
+    
+    TOOL 3: SEARCH WEB
+    Format: [[ACTION:SEARCH_WEB]] <search query>
+    
+    If the user does NOT ask to save a note, save a flashcard, or search the web, just answer their question normally with perfect markdown.`;
 
-    SPECIAL ABILITIES:
-    1. IMAGES: If the user asks you to generate an image, draw a picture, or create a photo, you MUST respond ONLY with a markdown image link using this exact format: ![Image Description](https://image.pollinations.ai/prompt/{URL%20Encoded%20Description%20of%20Image}). Do not add any other text.
-    2. DIAGRAMS: If the user asks for a diagram, architecture, or flowchart, you MUST use Mermaid.js code blocks. Example: \`\`\`mermaid graph TD; A-->B; \`\`\`.`;
-
-    // 1. Build conversation array and REMOVE massive image data so the AI brain doesn't crash
     const aiMessages = [
       { role: "system", content: systemPrompt },
       ...messages.map((m: any) => {
-        // If the message contains a Base64 image, replace the image data with text to prevent crashing the AI
         let safeContent = m.content;
         if (safeContent.includes("data:image")) {
           safeContent = safeContent.replace(/data:image\/[^;]+;base64,[^"\\)]+/g, "[User attached an image]");
         }
-        return {
-          role: m.role === "assistant" ? "assistant" : "user",
-          content: safeContent
-        };
+        return { role: m.role === "assistant" ? "assistant" : "user", content: safeContent };
       })
     ];
 
-    // 2. Send the safe conversation to the AI
     const aiRes = await fetch("https://text.pollinations.ai/", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        messages: aiMessages,
-        model: "openai",
-        private: true
-      })
+      body: JSON.stringify({ messages: aiMessages, model: "openai", private: true })
     });
     
     let aiText = "I couldn't connect to the AI brain right now. Please try again.";
@@ -71,7 +70,47 @@ export async function POST(req: Request) {
       aiText = await aiRes.text();
     }
 
-    // 3. Stream the smart response to the UI (typing effect)
+    // --- AGENT ACTION INTERCEPTOR ---
+    // If the AI decides to use a tool, we intercept it here!
+    if (aiText.startsWith("[[ACTION:CREATE_FLASHCARD]]")) {
+      const match = aiText.match(/Front:\s*(.*?)\s*\|\s*Back:\s*(.*)/);
+      if (match) {
+        await prisma.flashcard.create({
+          data: { front: match[1].trim(), back: match[2].trim(), userId: session.user.id }
+        });
+        aiText = "✅ **Agent Action:** I have successfully created and saved that flashcard to your Dashboard!";
+      }
+    } 
+    else if (aiText.startsWith("[[ACTION:SAVE_NOTE]]")) {
+      const match = aiText.match(/Title:\s*(.*?)\s*\|\s*Content:\s*(.*)/);
+      if (match) {
+        await prisma.note.create({
+          data: { title: match[1].trim(), content: match[2].trim(), userId: session.user.id }
+        });
+        aiText = "✅ **Agent Action:** I have successfully saved that note to your Dashboard!";
+      }
+    } 
+    else if (aiText.startsWith("[[ACTION:SEARCH_WEB]]")) {
+      const query = aiText.replace("[[ACTION:SEARCH_WEB]]", "").trim();
+      
+      // 1. Search Wikipedia (Free, no API key)
+      const searchRes = await fetch(`https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(query)}&format=json&origin=*`);
+      const searchData = await searchRes.json();
+      
+      let searchResultText = `I searched the live internet for "${query}", but couldn't find a direct answer.`;
+
+      if (searchData.query && searchData.query.search.length > 0) {
+        const topTitle = searchData.query.search[0].title;
+        const summaryRes = await fetch(`https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(topTitle)}`);
+        const summaryData = await summaryRes.json();
+        if (summaryData.extract) {
+          searchResultText = `🔍 I searched the live internet and found this regarding **${topTitle}**:\n\n${summaryData.extract}\n\n*(Source: Wikipedia Live API)*`;
+        }
+      }
+      aiText = searchResultText;
+    }
+
+    // --- STREAM RESPONSE TO UI ---
     const encoder = new TextEncoder();
     const customStream = new ReadableStream({
       async start(controller) {
@@ -84,26 +123,18 @@ export async function POST(req: Request) {
         controller.enqueue(encoder.encode('data: [DONE]\n\n'));
         controller.close();
 
-        // Save the original message (with image markdown) to the database
         await prisma.message.create({
-          data: {
-            conversationId: currentConvId,
-            role: "assistant",
-            content: aiText,
-          },
+          data: { conversationId: currentConvId, role: "assistant", content: aiText }
         });
         await prisma.conversation.update({
           where: { id: currentConvId },
-          data: { updatedAt: new Date() },
+          data: { updatedAt: new Date() }
         });
       },
     });
 
     return new Response(customStream, {
-      headers: {
-        'Content-Type': 'text/event-stream',
-        'Cache-Control': 'no-cache',
-      },
+      headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' }
     });
   } catch (error) {
     console.error("Chat API Error:", error);
