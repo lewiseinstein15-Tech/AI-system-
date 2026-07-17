@@ -42,9 +42,9 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    // Increased limit to 500KB (500,000 bytes) to allow larger files
-    if (file.size > 500000) {
-      alert("File is too large. Please upload a text file smaller than 500KB.");
+    // Increased limit to 50MB (50,000,000 bytes)
+    if (file.size > 50000000) {
+      alert("File is too large. Please upload a file smaller than 50MB.");
       return;
     }
 
