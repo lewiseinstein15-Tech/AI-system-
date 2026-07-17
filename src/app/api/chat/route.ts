@@ -39,14 +39,23 @@ export async function POST(req: Request) {
     1. IMAGES: If the user asks you to generate an image, draw a picture, or create a photo, you MUST respond ONLY with a markdown image link using this exact format: ![Image Description](https://image.pollinations.ai/prompt/{URL%20Encoded%20Description%20of%20Image}). Do not add any other text.
     2. DIAGRAMS: If the user asks for a diagram, architecture, or flowchart, you MUST use Mermaid.js code blocks. Example: \`\`\`mermaid graph TD; A-->B; \`\`\`.`;
 
+    // 1. Build conversation array and REMOVE massive image data so the AI brain doesn't crash
     const aiMessages = [
       { role: "system", content: systemPrompt },
-      ...messages.map((m: any) => ({
-        role: m.role === "assistant" ? "assistant" : "user",
-        content: m.content
-      }))
+      ...messages.map((m: any) => {
+        // If the message contains a Base64 image, replace the image data with text to prevent crashing the AI
+        let safeContent = m.content;
+        if (safeContent.includes("data:image")) {
+          safeContent = safeContent.replace(/data:image\/[^;]+;base64,[^"\\)]+/g, "[User attached an image]");
+        }
+        return {
+          role: m.role === "assistant" ? "assistant" : "user",
+          content: safeContent
+        };
+      })
     ];
 
+    // 2. Send the safe conversation to the AI
     const aiRes = await fetch("https://text.pollinations.ai/", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -62,6 +71,7 @@ export async function POST(req: Request) {
       aiText = await aiRes.text();
     }
 
+    // 3. Stream the smart response to the UI (typing effect)
     const encoder = new TextEncoder();
     const customStream = new ReadableStream({
       async start(controller) {
@@ -74,6 +84,7 @@ export async function POST(req: Request) {
         controller.enqueue(encoder.encode('data: [DONE]\n\n'));
         controller.close();
 
+        // Save the original message (with image markdown) to the database
         await prisma.message.create({
           data: {
             conversationId: currentConvId,
