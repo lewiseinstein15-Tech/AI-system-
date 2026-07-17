@@ -5,16 +5,14 @@ import { prisma } from "@/lib/prisma";
 import { z } from "zod";
 
 const FlashcardSchema = z.object({
-  front: z.string().min(1, "Front text is required"),
-  back: z.string().min(1, "Back text is required"),
+  front: z.string().min(1, "Front content is required"),
+  back: z.string().min(1, "Back content is required"),
 });
 
 export async function GET() {
   try {
     const session = await getServerSession(authOptions);
-    if (!session) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
+    if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
     const flashcards = await prisma.flashcard.findMany({
       where: { userId: session.user.id },
@@ -30,24 +28,23 @@ export async function GET() {
 export async function POST(req: Request) {
   try {
     const session = await getServerSession(authOptions);
-    if (!session) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
+    if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
     const body = await req.json();
     const validatedFields = FlashcardSchema.safeParse(body);
 
     if (!validatedFields.success) {
-      return NextResponse.json(
-        { error: "Invalid fields", details: validatedFields.error.flatten() },
-        { status: 400 }
-      );
+      return NextResponse.json({ error: "Invalid fields", details: validatedFields.error.flatten() }, { status: 400 });
     }
 
     const { front, back } = validatedFields.data;
 
     const flashcard = await prisma.flashcard.create({
-      data: { front, back, userId: session.user.id },
+      data: {
+        front,
+        back,
+        userId: session.user.id,
+      },
     });
 
     return NextResponse.json(flashcard, { status: 201 });
