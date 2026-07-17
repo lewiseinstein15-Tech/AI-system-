@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
-import { Send, Paperclip } from "lucide-react";
+import { Send, Paperclip, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 interface ChatInputProps {
@@ -12,6 +12,7 @@ interface ChatInputProps {
 export function ChatInput({ onSend, disabled }: ChatInputProps) {
   const [input, setInput] = useState("");
   const [fileName, setFileName] = useState("");
+  const [fileContent, setFileContent] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -24,57 +25,94 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!input.trim() || disabled) return;
-    onSend(input);
+    if ((!input.trim() && !fileContent) || disabled) return;
+    
+    // Combine message and file content safely
+    let finalMessage = input;
+    if (fileContent) {
+      finalMessage = `${input}\n\n[Attached File: ${fileName}]\n${fileContent}`.trim();
+    }
+    
+    onSend(finalMessage);
     setInput("");
     setFileName("");
+    setFileContent("");
   };
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
+    // Prevent large files from crashing the mobile browser (50kb limit)
+    if (file.size > 50000) {
+      alert("File is too large. Please upload a text file smaller than 50KB.");
+      return;
+    }
+
     setFileName(file.name);
 
     const reader = new FileReader();
     reader.onload = (event) => {
-      const fileContent = event.target?.result as string;
-      setInput(prev => `${prev}\n\n[Attached File: ${file.name}]\n${fileContent}`.trim());
+      const text = event.target?.result as string;
+      setFileContent(text);
     };
+    reader.onerror = () => {
+      alert("Could not read this file. Please upload text-based files like .py, .js, or .txt.");
+      setFileName("");
+    };
+    
+    // Read as text
     reader.readAsText(file); 
+  };
+
+  const clearFile = () => {
+    setFileName("");
+    setFileContent("");
+    if(fileInputRef.current) fileInputRef.current.value = "";
   };
 
   return (
     <div className="border-t border-border bg-background/80 backdrop-blur-md">
       <form onSubmit={handleSubmit} className="mx-auto flex max-w-3xl items-end gap-2 p-4">
-        <div className="flex flex-1 items-center rounded-lg border border-border bg-accent focus-within:ring-2 focus-within:ring-primary transition-all">
-          <button type="button" onClick={() => fileInputRef.current?.click()} className="p-3 text-foreground/40 hover:text-primary transition-colors">
-            <Paperclip className="h-5 w-5" />
-          </button>
-          <input 
-            type="file" 
-            ref={fileInputRef} 
-            onChange={handleFileChange} 
-            className="hidden" 
-            accept=".txt,.js,.ts,.tsx,.py,.java,.c,.cpp,.md,.json" 
-          />
-          <textarea
-            ref={textareaRef}
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            placeholder={fileName ? `Attached: ${fileName}` : "Ask anything about Computer Science..."}
-            rows={1}
-            // Added font-mono here!
-            className="flex-1 resize-none bg-transparent py-3 text-sm font-mono focus:outline-none max-h-40"
-            disabled={disabled}
-          />
+        <div className="flex flex-1 flex-col gap-2">
+          {/* Visual File Attachment Chip */}
+          {fileName && (
+            <div className="flex items-center justify-between bg-accent border border-primary/30 text-primary px-3 py-1.5 rounded-md text-xs font-mono">
+              <span className="truncate">📎 {fileName}</span>
+              <button type="button" onClick={clearFile} className="ml-2 text-foreground/60 hover:text-red-500">
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+          )}
+          
+          <div className="flex flex-1 items-center rounded-lg border border-border bg-accent focus-within:ring-2 focus-within:ring-primary transition-all">
+            <button type="button" onClick={() => fileInputRef.current?.click()} className="p-3 text-foreground/40 hover:text-primary transition-colors">
+              <Paperclip className="h-5 w-5" />
+            </button>
+            <input 
+              type="file" 
+              ref={fileInputRef} 
+              onChange={handleFileChange} 
+              className="hidden" 
+              accept=".txt,.js,.ts,.tsx,.py,.java,.c,.cpp,.md,.json,.csv,.html,.css" 
+            />
+            <textarea
+              ref={textareaRef}
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              placeholder={fileName ? "Type a message about your file..." : "Ask anything about Computer Science..."}
+              rows={1}
+              className="flex-1 resize-none bg-transparent py-3 text-sm font-mono focus:outline-none max-h-40"
+              disabled={disabled}
+            />
+          </div>
         </div>
         <button
           type="submit"
-          disabled={disabled || !input.trim()}
+          disabled={disabled || (!input.trim() && !fileContent)}
           className={cn(
             "flex h-10 w-10 items-center justify-center rounded-lg transition-all duration-200",
-            disabled || !input.trim()
+            disabled || (!input.trim() && !fileContent)
               ? "bg-accent text-foreground/30 cursor-not-allowed"
               : "bg-primary text-black hover:bg-primary/90 scale-105"
           )}
