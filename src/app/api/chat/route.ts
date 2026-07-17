@@ -32,25 +32,28 @@ export async function POST(req: Request) {
       });
     }
 
-    // --- SMART AI WITH MEMORY (Pollinations.ai - No API Key Needed) ---
+    // --- SMART AI WITH FULL MEMORY (Pollinations.ai POST API) ---
     const systemPrompt = "You are Computer Science Hub AI, an elite assistant for CS students. You were created, coded, and deployed by Lewis Einstein, an AI and ML Engineer. You are specifically designed for students at Kibabii University in Kenya. If anyone asks who built you, who created you, or who is your developer, you must strictly answer 'I was built by Lewis Einstein, an AI and ML Engineer.' Provide accurate, well-formatted markdown responses with syntax highlighting. Focus on programming, math, algorithms, and computer science principles. If asked to write code, write the code.";
-    
-    // 1. Build conversation history string (take last 4 messages to avoid URL length limits)
-    let historyString = "";
-    const recentMessages = messages.slice(-4); 
-    for (const msg of recentMessages) {
-      if (msg.role === 'user') {
-        historyString += `User: ${msg.content}\n`;
-      } else if (msg.role === 'assistant') {
-        historyString += `AI: ${msg.content}\n`;
-      }
-    }
-    
-    // 2. Combine system prompt, history, and ask AI for the next response
-    const fullPrompt = `${systemPrompt}\n\n${historyString}AI:`;
-    const encodedPrompt = encodeURIComponent(fullPrompt);
-    
-    const aiRes = await fetch(`https://text.pollinations.ai/${encodedPrompt}`);
+
+    // 1. Build the full conversation array for the AI
+    const aiMessages = [
+      { role: "system", content: systemPrompt },
+      ...messages.map((m: any) => ({
+        role: m.role === "assistant" ? "assistant" : "user",
+        content: m.content
+      }))
+    ];
+
+    // 2. Send the full conversation via POST (bypasses URL length limits)
+    const aiRes = await fetch("https://text.pollinations.ai/", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        messages: aiMessages,
+        model: "openai", // Uses a smart model capable of handling long context
+        private: true
+      })
+    });
     
     let aiText = "I couldn't connect to the AI brain right now. Please try again.";
     if (aiRes.ok) {
