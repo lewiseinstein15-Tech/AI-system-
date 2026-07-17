@@ -9,15 +9,13 @@ export async function DELETE(
 ) {
   try {
     const session = await getServerSession(authOptions);
-    if (!session) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
+    if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-    await prisma.flashcard.delete({
+    await prisma.flashcard.deleteMany({
       where: { id: params.id, userId: session.user.id },
     });
 
-    return NextResponse.json({ message: "Flashcard deleted successfully" });
+    return NextResponse.json({ message: "Deleted successfully" });
   } catch (error) {
     return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });
   }
