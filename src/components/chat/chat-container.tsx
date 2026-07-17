@@ -53,7 +53,9 @@ export function ChatContainer() {
     if (!session) return;
 
     const newUserMessage: Message = { role: "user", content: message };
-    setMessages((prev) => [...prev, newUserMessage]);
+    
+    // 1. Add user message AND an empty AI message INSTANTLY
+    setMessages((prev) => [...prev, newUserMessage, { role: "assistant", content: "" }]);
     setIsStreaming(true);
 
     try {
@@ -69,8 +71,6 @@ export function ChatContainer() {
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let assistantContent = "";
-
-      setMessages((prev) => [...prev, { role: "assistant", content: "" }]);
 
       while (true) {
         const { done, value } = await reader.read();
@@ -99,7 +99,11 @@ export function ChatContainer() {
       }
     } catch (error) {
       console.error("Chat Error:", error);
-      setMessages((prev) => [...prev, { role: "assistant", content: "Error: Unable to fetch response." }]);
+      setMessages((prev) => {
+        const newMessages = [...prev];
+        newMessages[newMessages.length - 1] = { role: "assistant", content: "Error: Unable to fetch response." };
+        return newMessages;
+      });
     } finally {
       setIsStreaming(false);
     }
