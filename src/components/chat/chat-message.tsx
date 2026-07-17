@@ -127,15 +127,15 @@ export function ChatMessage({ role, content, isStreaming }: ChatMessageProps) {
               img({ node, ...props }) {
                 return <img alt="AI Generated" className="max-w-full h-auto rounded-lg my-4 border border-border" {...props} />;
               },
-              // FIXED TABLE FORMATTING: Allow text to wrap naturally and use table-layout auto
+              // FORCED TABLE FIXED LAYOUT: This makes the table strictly respect the screen width and wrap text perfectly
               table({ node, ...props }) {
-                return <div className="w-full overflow-x-auto my-4"><table className="w-full border-collapse border border-border table-auto" {...props} /></div>;
+                return <div className="w-full my-4"><table className="w-full table-fixed border-collapse border border-border" {...props} /></div>;
               },
               th({ node, ...props }) {
-                return <th className="border border-border p-2 text-left bg-accent whitespace-normal break-words" {...props} />;
+                return <th className="border border-border p-2 text-left bg-accent break-words whitespace-normal" {...props} />;
               },
               td({ node, ...props }) {
-                return <td className="border border-border p-2 whitespace-normal break-words align-top" {...props} />;
+                return <td className="border border-border p-2 break-words whitespace-normal align-top" {...props} />;
               }
             }}
           >
