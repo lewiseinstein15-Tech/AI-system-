@@ -41,7 +41,7 @@ export function ChatMessage({ role, content, isStreaming }: ChatMessageProps) {
       </div>
       <div className="flex-1 overflow-hidden">
         <div className="mb-1 flex items-center gap-2">
-          <span className="text-sm font-semibold">{isIncoming ? "CS Hub AI" : "You"}</span>
+          <span className="text-sm font-semibold font-mono">{isIncoming ? "CS Hub AI" : "You"}</span>
           {isIncoming && (
             <button
               onClick={handleCopy}
@@ -53,7 +53,7 @@ export function ChatMessage({ role, content, isStreaming }: ChatMessageProps) {
         </div>
         <div
           className={cn(
-            "prose prose-invert max-w-none text-sm leading-relaxed",
+            "prose prose-invert max-w-none text-sm leading-relaxed font-mono", // Added font-mono here!
             isStreaming && "typing-cursor"
           )}
         >
@@ -63,11 +63,11 @@ export function ChatMessage({ role, content, isStreaming }: ChatMessageProps) {
                 const match = /language-(\w+)/.exec(className || "");
                 return !inline && match ? (
                   <div className="my-4 overflow-hidden rounded-md border border-border bg-accent/50">
-                    <div className="flex items-center justify-between border-b border-border px-4 py-2 text-xs text-foreground/60">
+                    <div className="flex items-center justify-between border-b border-border px-4 py-2 text-xs text-foreground/60 font-mono">
                       <span>{match[1]}</span>
                       <button
                         onClick={() => navigator.clipboard.writeText(String(children))}
-                        className="hover:text-primary"
+                        className="hover:text-primary font-mono"
                       >
                         Copy code
                       </button>
@@ -76,14 +76,14 @@ export function ChatMessage({ role, content, isStreaming }: ChatMessageProps) {
                       style={vscDarkPlus}
                       language={match[1]}
                       PreTag="div"
-                      className="!bg-transparent !text-sm"
+                      className="!bg-transparent !text-sm font-mono"
                       {...props}
                     >
                       {String(children).replace(/\n$/, "")}
                     </SyntaxHighlighter>
                   </div>
                 ) : (
-                  <code className="rounded bg-accent px-1 py-0.5 text-primary" {...props}>
+                  <code className="rounded bg-accent px-1 py-0.5 text-primary font-mono" {...props}>
                     {children}
                   </code>
                 );
