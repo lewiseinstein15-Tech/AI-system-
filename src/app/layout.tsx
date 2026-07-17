@@ -21,7 +21,7 @@ export const viewport: Viewport = {
   themeColor: "#39FF14",
   width: "device-width",
   initialScale: 1,
-  maximumScale: 1, // Prevents zooming so it feels like a real app
+  maximumScale: 1,
 };
 
 export default function RootLayout({
@@ -31,7 +31,8 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en" className="dark">
-      <body className={`${inter.variable} ${jetbrainsMono.variable} font-sans bg-background text-foreground antialiased`}>
+      {/* Removed bg-background from body to let the CSS grid show through */}
+      <body className={`${inter.variable} ${jetbrainsMono.variable} font-sans text-foreground antialiased`}>
         <Providers>{children}</Providers>
       </body>
     </html>
