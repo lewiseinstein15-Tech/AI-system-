@@ -4,7 +4,7 @@ import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 
-export const runtime = "edge";
+// Do NOT use "edge" runtime here. Prisma requires the Node.js runtime.
 
 export async function POST(req: Request) {
   try {
@@ -18,7 +18,6 @@ export async function POST(req: Request) {
     let currentConvId = conversationId;
 
     if (!currentConvId) {
-      // Create new conversation if not provided
       const newConversation = await prisma.conversation.create({
         data: {
           userId: session.user.id,
@@ -27,7 +26,6 @@ export async function POST(req: Request) {
       });
       currentConvId = newConversation.id;
       
-      // Save the user's prompt
       await prisma.message.create({
         data: {
           conversationId: currentConvId,
@@ -42,7 +40,6 @@ export async function POST(req: Request) {
       system: "You are Computer Science Hub AI, an elite assistant for CS students. Provide accurate, well-formatted markdown responses with syntax highlighting. Focus on programming, math, algorithms, and computer science principles.",
       messages: messages,
       onFinish: async (completion) => {
-        // Save the AI's response when stream finishes
         await prisma.message.create({
           data: {
             conversationId: currentConvId,
@@ -57,7 +54,8 @@ export async function POST(req: Request) {
       }
     });
 
-    return result.toAIStreamResponse();
+    // Updated for AI SDK v3
+    return result.toDataStreamResponse();
   } catch (error) {
     console.error("Chat API Error:", error);
     return new Response(JSON.stringify({ error: "Internal Server Error" }), { status: 500 });
