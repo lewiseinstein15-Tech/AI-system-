@@ -2,7 +2,6 @@ import { NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-import { NoteSchema } from "@/lib/validators";
 
 export async function PATCH(
   req: Request,
@@ -10,28 +9,20 @@ export async function PATCH(
 ) {
   try {
     const session = await getServerSession(authOptions);
-    if (!session) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
+    if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-    const body = await req.json();
-    const validatedFields = NoteSchema.safeParse(body);
-
-    if (!validatedFields.success) {
-      return NextResponse.json(
-        { error: "Invalid fields", details: validatedFields.error.flatten() },
-        { status: 400 }
-      );
-    }
-
-    const { title, content } = validatedFields.data;
-
-    const updatedNote = await prisma.note.update({
+    const { title, content } = await req.json();
+    
+    const updatedNote = await prisma.note.updateMany({
       where: { id: params.id, userId: session.user.id },
       data: { title, content },
     });
 
-    return NextResponse.json(updatedNote);
+    if (updatedNote.count === 0) {
+      return NextResponse.json({ error: "Note not found or unauthorized" }, { status: 404 });
+    }
+
+    return NextResponse.json({ message: "Note updated successfully" });
   } catch (error) {
     return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });
   }
@@ -43,15 +34,13 @@ export async function DELETE(
 ) {
   try {
     const session = await getServerSession(authOptions);
-    if (!session) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
+    if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-    await prisma.note.delete({
+    await prisma.note.deleteMany({
       where: { id: params.id, userId: session.user.id },
     });
 
-    return NextResponse.json({ message: "Note deleted successfully" });
+    return NextResponse.json({ message: "Deleted successfully" });
   } catch (error) {
     return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });
   }
