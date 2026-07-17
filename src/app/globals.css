@@ -11,11 +11,16 @@
   }
 
   * {
-    border-color: hsl(var(--border));
+    border-color: hsl(0 0% 20%);
   }
 
   body {
-    background-color: hsl(var(--background));
+    background-color: #000000;
+    /* This creates the cool hacker grid background */
+    background-image: 
+      linear-gradient(rgba(57, 255, 20, 0.03) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(57, 255, 20, 0.03) 1px, transparent 1px);
+    background-size: 20px 20px;
     color: hsl(var(--foreground));
     font-feature-settings: "rlig" 1, "calt" 1;
   }
