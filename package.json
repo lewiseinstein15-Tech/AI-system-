@@ -10,14 +10,14 @@
     "postinstall": "prisma generate"
   },
   "dependencies": {
-    "@ai-sdk/groq": "^0.0.10",
+    "@ai-sdk/groq": "latest",
     "@auth/prisma-adapter": "^1.0.0",
     "@prisma/client": "^5.0.0",
     "@radix-ui/react-avatar": "^1.0.0",
     "@radix-ui/react-dialog": "^1.0.0",
     "@radix-ui/react-dropdown-menu": "^2.0.0",
     "@radix-ui/react-toast": "^1.0.0",
-    "ai": "^3.0.0",
+    "ai": "latest",
     "bcryptjs": "^2.4.3",
     "class-variance-authority": "^0.7.0",
     "clsx": "^2.0.0",
