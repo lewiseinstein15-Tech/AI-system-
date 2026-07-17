@@ -13,6 +13,7 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
   const [input, setInput] = useState("");
   const [fileName, setFileName] = useState("");
   const [fileContent, setFileContent] = useState("");
+  const [fileType, setFileType] = useState<"text" | "image">("text");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -29,20 +30,26 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
     
     let finalMessage = input;
     if (fileContent) {
-      finalMessage = `${input}\n\n[Attached File: ${fileName}]\n${fileContent}`.trim();
+      if (fileType === "image") {
+        // Display the image in the chat using markdown syntax
+        finalMessage = `${input}\n\n[Attached Image: ${fileName}]\n![Image](${fileContent})`.trim();
+      } else {
+        finalMessage = `${input}\n\n[Attached File: ${fileName}]\n${fileContent}`.trim();
+      }
     }
     
     onSend(finalMessage);
     setInput("");
     setFileName("");
     setFileContent("");
+    setFileType("text");
   };
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    // Increased limit to 50MB (50,000,000 bytes)
+    // 50MB limit (50,000,000 bytes)
     if (file.size > 50000000) {
       alert("File is too large. Please upload a file smaller than 50MB.");
       return;
@@ -51,21 +58,34 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
     setFileName(file.name);
 
     const reader = new FileReader();
-    reader.onload = (event) => {
-      const text = event.target?.result as string;
-      setFileContent(text);
-    };
-    reader.onerror = () => {
-      alert("Could not read this file. Please upload text-based files like .py, .js, or .txt.");
-      setFileName("");
-    };
     
-    reader.readAsText(file); 
+    // If it's an image, read it as a Data URL so it can be displayed
+    if (file.type.startsWith("image/")) {
+      setFileType("image");
+      reader.onload = (event) => {
+        const result = event.target?.result as string;
+        setFileContent(result);
+      };
+      reader.readAsDataURL(file);
+    } else {
+      // Otherwise, read it as text (for .py, .js, .txt, etc.)
+      setFileType("text");
+      reader.onload = (event) => {
+        const text = event.target?.result as string;
+        setFileContent(text);
+      };
+      reader.onerror = () => {
+        alert("Could not read this file. Please upload text files or images.");
+        setFileName("");
+      };
+      reader.readAsText(file); 
+    }
   };
 
   const clearFile = () => {
     setFileName("");
     setFileContent("");
+    setFileType("text");
     if(fileInputRef.current) fileInputRef.current.value = "";
   };
 
@@ -91,7 +111,7 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
               ref={fileInputRef} 
               onChange={handleFileChange} 
               className="hidden" 
-              accept=".txt,.js,.ts,.tsx,.py,.java,.c,.cpp,.md,.json,.csv,.html,.css" 
+              accept=".txt,.js,.ts,.tsx,.py,.java,.c,.cpp,.md,.json,.csv,.html,.css,image/*" 
             />
             <textarea
               ref={textareaRef}
