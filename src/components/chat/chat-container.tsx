@@ -53,8 +53,6 @@ export function ChatContainer() {
     if (!session) return;
 
     const newUserMessage: Message = { role: "user", content: message };
-    
-    // 1. Add user message AND an empty AI message INSTANTLY
     setMessages((prev) => [...prev, newUserMessage, { role: "assistant", content: "" }]);
     setIsStreaming(true);
 
@@ -135,7 +133,7 @@ export function ChatContainer() {
         <Sidebar onConversationSelect={handleSelectConversation} />
       </div>
 
-      <div className="flex flex-1 flex-col">
+      <div className="flex flex-1 flex-col overflow-hidden">
         <header className="border-b border-border p-4 md:hidden flex items-center justify-between">
           <button onClick={() => setMobileSidebarOpen(!mobileSidebarOpen)}>
             {mobileSidebarOpen ? <X className="h-6 w-6 text-primary" /> : <Menu className="h-6 w-6 text-primary" />}
@@ -144,7 +142,8 @@ export function ChatContainer() {
           <div className="w-6"></div>
         </header>
         
-        <div className="flex-1 overflow-y-auto">
+        {/* Added overflow-x-hidden here to stop the whole screen from expanding */}
+        <div className="flex-1 overflow-y-auto overflow-x-hidden">
           <div className="mx-auto max-w-3xl py-6">
             {messages.length === 0 ? (
               <div className="flex flex-col items-center justify-center h-[60vh] gap-4 text-center">
@@ -156,7 +155,6 @@ export function ChatContainer() {
               </div>
             ) : (
               messages.map((msg, i) => {
-                // Show Thinking Animation if it's the AI's turn and content is still empty
                 const isThinking = isStreaming && i === messages.length - 1 && msg.role === "assistant" && msg.content === "";
                 
                 if (isThinking) {
