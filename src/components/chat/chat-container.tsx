@@ -104,8 +104,17 @@ export function ChatContainer() {
     const res = await fetch(`/api/conversations/${id}`);
     const data = await res.json();
     setMessages(data.messages.map((m: any) => ({ role: m.role, content: m.content })));
-    setMobileSidebarOpen(false); // Close sidebar on mobile after selecting
+    setMobileSidebarOpen(false);
   };
+
+  // FIX: If the app is checking login status, show a Loading screen instead of the chat page.
+  if (status === "loading" || status === "unauthenticated") {
+    return (
+      <div className="flex h-screen items-center justify-center bg-background">
+        <div className="animate-pulse text-primary font-mono">Loading CS Hub AI...</div>
+      </div>
+    );
+  }
 
   return (
     <div className="flex h-screen overflow-hidden bg-background text-foreground">
