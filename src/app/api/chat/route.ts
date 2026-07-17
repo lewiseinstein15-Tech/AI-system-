@@ -1,4 +1,4 @@
-import { google } from '@ai-sdk/google';
+limport { google } from '@ai-sdk/google';
 import { streamText } from 'ai';
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
