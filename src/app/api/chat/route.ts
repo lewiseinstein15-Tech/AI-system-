@@ -1,4 +1,4 @@
-limport { google } from '@ai-sdk/google';
+import { groq } from '@ai-sdk/groq';
 import { streamText } from 'ai';
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
@@ -34,7 +34,7 @@ export async function POST(req: Request) {
     }
 
     const result = await streamText({
-      model: google('gemini-1.5-flash'),
+      model: groq('llama3-8b-8192'),
       system: "You are Computer Science Hub AI, an elite assistant for CS students. Provide accurate, well-formatted markdown responses with syntax highlighting. Focus on programming, math, algorithms, and computer science principles.",
       messages: messages,
       onFinish: async (completion) => {
