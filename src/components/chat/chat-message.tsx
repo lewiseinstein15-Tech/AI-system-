@@ -15,7 +15,6 @@ interface ChatMessageProps {
   isStreaming?: boolean;
 }
 
-// Helper component to render Mermaid diagrams
 const MermaidRenderer = ({ code }: { code: string }) => {
   const [svg, setSvg] = useState<string | null>(null);
 
@@ -65,7 +64,6 @@ export function ChatMessage({ role, content, isStreaming }: ChatMessageProps) {
           {isIncoming ? <Bot className="h-5 w-5" /> : <User className="h-5 w-5" />}
         </div>
       </div>
-      {/* Added min-w-0 here so flexbox allows the content to shrink and scroll instead of pushing off screen */}
       <div className="flex-1 overflow-hidden min-w-0">
         <div className="mb-1 flex items-center gap-2">
           <span className="text-sm font-semibold font-mono">{isIncoming ? "CS Hub AI" : "You"}</span>
@@ -129,15 +127,15 @@ export function ChatMessage({ role, content, isStreaming }: ChatMessageProps) {
               img({ node, ...props }) {
                 return <img alt="AI Generated" className="max-w-full h-auto rounded-lg my-4 border border-border" {...props} />;
               },
-              // Added w-full and max-w-full to force the table to respect screen width and scroll horizontally
+              // FIXED TABLE FORMATTING: Allow text to wrap naturally and use table-layout auto
               table({ node, ...props }) {
-                return <div className="w-full max-w-full overflow-x-auto my-4"><table className="min-w-full border-collapse border border-border" {...props} /></div>;
+                return <div className="w-full overflow-x-auto my-4"><table className="w-full border-collapse border border-border table-auto" {...props} /></div>;
               },
               th({ node, ...props }) {
-                return <th className="border border-border p-2 text-left bg-accent whitespace-nowrap" {...props} />;
+                return <th className="border border-border p-2 text-left bg-accent whitespace-normal break-words" {...props} />;
               },
               td({ node, ...props }) {
-                return <td className="border border-border p-2 whitespace-nowrap" {...props} />;
+                return <td className="border border-border p-2 whitespace-normal break-words align-top" {...props} />;
               }
             }}
           >
