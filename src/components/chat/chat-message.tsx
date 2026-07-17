@@ -65,7 +65,8 @@ export function ChatMessage({ role, content, isStreaming }: ChatMessageProps) {
           {isIncoming ? <Bot className="h-5 w-5" /> : <User className="h-5 w-5" />}
         </div>
       </div>
-      <div className="flex-1 overflow-hidden">
+      {/* Added min-w-0 here so flexbox allows the content to shrink and scroll instead of pushing off screen */}
+      <div className="flex-1 overflow-hidden min-w-0">
         <div className="mb-1 flex items-center gap-2">
           <span className="text-sm font-semibold font-mono">{isIncoming ? "CS Hub AI" : "You"}</span>
           {isIncoming && (
@@ -90,12 +91,10 @@ export function ChatMessage({ role, content, isStreaming }: ChatMessageProps) {
                 const match = /language-(\w+)/.exec(className || "");
                 const codeString = String(children).replace(/\n$/, "");
                 
-                // Render Mermaid diagrams visually
                 if (match && match[1] === "mermaid") {
                   return <MermaidRenderer code={codeString} />;
                 }
 
-                // Render Code blocks
                 if (!inline && match) {
                   return (
                     <div className="my-4 overflow-hidden rounded-md border border-border bg-accent/50">
@@ -121,26 +120,24 @@ export function ChatMessage({ role, content, isStreaming }: ChatMessageProps) {
                   );
                 }
                 
-                // Render inline code
                 return (
                   <code className="rounded bg-accent px-1 py-0.5 text-primary font-mono" {...props}>
                     {children}
                   </code>
                 );
               },
-              // Make images responsive and render AI generated images
               img({ node, ...props }) {
                 return <img alt="AI Generated" className="max-w-full h-auto rounded-lg my-4 border border-border" {...props} />;
               },
-              // Make tables scrollable on mobile so they don't break the screen
+              // Added w-full and max-w-full to force the table to respect screen width and scroll horizontally
               table({ node, ...props }) {
-                return <div className="overflow-x-auto my-4"><table className="min-w-full border-collapse border border-border" {...props} /></div>;
+                return <div className="w-full max-w-full overflow-x-auto my-4"><table className="min-w-full border-collapse border border-border" {...props} /></div>;
               },
               th({ node, ...props }) {
-                return <th className="border border-border p-2 text-left bg-accent" {...props} />;
+                return <th className="border border-border p-2 text-left bg-accent whitespace-nowrap" {...props} />;
               },
               td({ node, ...props }) {
-                return <td className="border border-border p-2" {...props} />;
+                return <td className="border border-border p-2 whitespace-nowrap" {...props} />;
               }
             }}
           >
