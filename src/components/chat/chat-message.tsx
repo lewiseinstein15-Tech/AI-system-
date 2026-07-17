@@ -127,15 +127,30 @@ export function ChatMessage({ role, content, isStreaming }: ChatMessageProps) {
               img({ node, ...props }) {
                 return <img alt="AI Generated" className="max-w-full h-auto rounded-lg my-4 border border-border" {...props} />;
               },
-              // FORCED TABLE FIXED LAYOUT: This makes the table strictly respect the screen width and wrap text perfectly
+              // NEW MOBILE-FRIENDLY TABLE IMPLEMENTATION
               table({ node, ...props }) {
-                return <div className="w-full my-4"><table className="w-full table-fixed border-collapse border border-border" {...props} /></div>;
+                return (
+                  <div className="my-4 w-full">
+                    {/* Swipe Hint - only shows on mobile (md:hidden) */}
+                    <p className="md:hidden text-xs text-primary/60 mb-2 text-center animate-pulse font-mono">
+                      ↔ Swipe horizontally to view full table ↔
+                    </p>
+                    <div className="overflow-x-auto rounded-md border border-border bg-accent/20">
+                      <table className="min-w-full border-collapse" {...props} />
+                    </div>
+                  </div>
+                );
+              },
+              thead({ node, ...props }) {
+                // Sticky header for better scrolling
+                return <thead className="sticky top-0 z-10 bg-accent" {...props} />;
               },
               th({ node, ...props }) {
-                return <th className="border border-border p-2 text-left bg-accent break-words whitespace-normal" {...props} />;
+                return <th className="border border-border p-3 text-left whitespace-nowrap text-xs sm:text-sm" {...props} />;
               },
               td({ node, ...props }) {
-                return <td className="border border-border p-2 break-words whitespace-normal align-top" {...props} />;
+                // Added align-top so long sentences wrap nicely at the top of the cell
+                return <td className="border border-border p-3 break-words whitespace-normal text-xs sm:text-sm align-top" {...props} />;
               }
             }}
           >
