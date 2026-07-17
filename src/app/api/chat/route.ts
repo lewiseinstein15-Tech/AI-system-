@@ -1,10 +1,8 @@
-import { openai } from '@ai-sdk/openai';
+import { google } from '@ai-sdk/google';
 import { streamText } from 'ai';
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-
-// Do NOT use "edge" runtime here. Prisma requires the Node.js runtime.
 
 export async function POST(req: Request) {
   try {
@@ -36,7 +34,7 @@ export async function POST(req: Request) {
     }
 
     const result = await streamText({
-      model: openai('gpt-4'),
+      model: google('gemini-1.5-flash'),
       system: "You are Computer Science Hub AI, an elite assistant for CS students. Provide accurate, well-formatted markdown responses with syntax highlighting. Focus on programming, math, algorithms, and computer science principles.",
       messages: messages,
       onFinish: async (completion) => {
@@ -54,7 +52,6 @@ export async function POST(req: Request) {
       }
     });
 
-    // Updated for AI SDK v3
     return result.toDataStreamResponse();
   } catch (error) {
     console.error("Chat API Error:", error);
