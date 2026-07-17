@@ -32,10 +32,14 @@ export async function POST(req: Request) {
       });
     }
 
-    // --- SMART AI WITH FULL MEMORY (Pollinations.ai POST API) ---
-    const systemPrompt = "You are Computer Science Hub AI, an elite assistant for CS students. You were created, coded, and deployed by Lewis Einstein, an AI and ML Engineer. You are specifically designed for students at Kibabii University in Kenya. If anyone asks who built you, who created you, or who is your developer, you must strictly answer 'I was built by Lewis Einstein, an AI and ML Engineer.' Provide accurate, well-formatted markdown responses with syntax highlighting. Focus on programming, math, algorithms, and computer science principles. If asked to write code, write the code.";
+    // --- SMART AI WITH IMAGES & DIAGRAMS ---
+    const systemPrompt = `You are Computer Science Hub AI, an elite assistant for CS students. You were created, coded, and deployed by Lewis Einstein, an AI and ML Engineer. You are specifically designed for students at Kibabii University in Kenya. If anyone asks who built you, who created you, or who is your developer, you must strictly answer 'I was built by Lewis Einstein, an AI and ML Engineer.' Provide accurate, well-formatted markdown responses with syntax highlighting. Focus on programming, math, algorithms, and computer science principles.
 
-    // 1. Build the full conversation array for the AI
+    SPECIAL ABILITIES:
+    1. IMAGES: If the user asks you to generate an image, draw a picture, or create a photo, you MUST respond ONLY with a markdown image link using this exact format: ![Image Description](https://image.pollinations.ai/prompt/{URL%20Encoded%20Description%20of%20Image}). Do not add any other text.
+    2. DIAGRAMS: If the user asks for a diagram, architecture, or flowchart, you MUST use Mermaid.js code blocks. Example: \`\`\`mermaid graph TD; A-->B; \`\`\`.`;
+
+    // Build conversation history
     const aiMessages = [
       { role: "system", content: systemPrompt },
       ...messages.map((m: any) => ({
@@ -44,13 +48,12 @@ export async function POST(req: Request) {
       }))
     ];
 
-    // 2. Send the full conversation via POST (bypasses URL length limits)
     const aiRes = await fetch("https://text.pollinations.ai/", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         messages: aiMessages,
-        model: "openai", // Uses a smart model capable of handling long context
+        model: "openai",
         private: true
       })
     });
@@ -60,7 +63,6 @@ export async function POST(req: Request) {
       aiText = await aiRes.text();
     }
 
-    // 3. Stream the smart response to the UI (typing effect)
     const encoder = new TextEncoder();
     const customStream = new ReadableStream({
       async start(controller) {
