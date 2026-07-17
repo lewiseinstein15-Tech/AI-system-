@@ -27,7 +27,6 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
     e.preventDefault();
     if ((!input.trim() && !fileContent) || disabled) return;
     
-    // Combine message and file content safely
     let finalMessage = input;
     if (fileContent) {
       finalMessage = `${input}\n\n[Attached File: ${fileName}]\n${fileContent}`.trim();
@@ -43,9 +42,9 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    // Prevent large files from crashing the mobile browser (50kb limit)
-    if (file.size > 50000) {
-      alert("File is too large. Please upload a text file smaller than 50KB.");
+    // Increased limit to 500KB (500,000 bytes) to allow larger files
+    if (file.size > 500000) {
+      alert("File is too large. Please upload a text file smaller than 500KB.");
       return;
     }
 
@@ -61,7 +60,6 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
       setFileName("");
     };
     
-    // Read as text
     reader.readAsText(file); 
   };
 
@@ -75,7 +73,6 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
     <div className="border-t border-border bg-background/80 backdrop-blur-md">
       <form onSubmit={handleSubmit} className="mx-auto flex max-w-3xl items-end gap-2 p-4">
         <div className="flex flex-1 flex-col gap-2">
-          {/* Visual File Attachment Chip */}
           {fileName && (
             <div className="flex items-center justify-between bg-accent border border-primary/30 text-primary px-3 py-1.5 rounded-md text-xs font-mono">
               <span className="truncate">📎 {fileName}</span>
