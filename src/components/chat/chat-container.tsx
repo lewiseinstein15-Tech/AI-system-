@@ -6,6 +6,7 @@ import { ChatMessage } from "./chat-message";
 import { ChatInput } from "./chat-input";
 import { useRouter } from "next/navigation";
 import { useSession } from "next-auth/react";
+import { Menu, X } from "lucide-react";
 
 interface Message {
   role: "user" | "assistant" | "system";
@@ -18,6 +19,7 @@ export function ChatContainer() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
   const [conversationId, setConversationId] = useState<string | null>(null);
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -82,7 +84,7 @@ export function ChatContainer() {
               });
             }
           } catch (e) {
-            // Ignore JSON parse errors for incomplete chunks
+            // Ignore JSON parse errors
           }
         }
       }
@@ -102,17 +104,29 @@ export function ChatContainer() {
     const res = await fetch(`/api/conversations/${id}`);
     const data = await res.json();
     setMessages(data.messages.map((m: any) => ({ role: m.role, content: m.content })));
+    setMobileSidebarOpen(false); // Close sidebar on mobile after selecting
   };
 
   return (
     <div className="flex h-screen overflow-hidden bg-background text-foreground">
-      <div className="hidden md:flex">
+      {/* Mobile Sidebar Overlay */}
+      {mobileSidebarOpen && (
+        <div className="fixed inset-0 z-30 bg-black/50 md:hidden" onClick={() => setMobileSidebarOpen(false)} />
+      )}
+      
+      <div className={`fixed md:relative z-40 h-full transition-transform duration-300 ${mobileSidebarOpen ? "translate-x-0" : "-translate-x-full md:translate-x-0"}`}>
         <Sidebar onConversationSelect={handleSelectConversation} />
       </div>
+
       <div className="flex flex-1 flex-col">
-        <header className="border-b border-border p-4 md:hidden">
+        <header className="border-b border-border p-4 md:hidden flex items-center justify-between">
+          <button onClick={() => setMobileSidebarOpen(!mobileSidebarOpen)}>
+            {mobileSidebarOpen ? <X className="h-6 w-6 text-primary" /> : <Menu className="h-6 w-6 text-primary" />}
+          </button>
           <h1 className="text-lg font-bold text-primary">CS Hub AI</h1>
+          <div className="w-6"></div>
         </header>
+        
         <div className="flex-1 overflow-y-auto">
           <div className="mx-auto max-w-3xl py-6">
             {messages.length === 0 ? (
