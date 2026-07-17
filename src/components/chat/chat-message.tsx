@@ -64,7 +64,8 @@ export function ChatMessage({ role, content, isStreaming }: ChatMessageProps) {
           {isIncoming ? <Bot className="h-5 w-5" /> : <User className="h-5 w-5" />}
         </div>
       </div>
-      <div className="flex-1 overflow-hidden min-w-0">
+      {/* Added max-w-full calc to strictly prevent screen expansion */}
+      <div className="flex-1 overflow-hidden min-w-0" style={{ maxWidth: "calc(100% - 48px)" }}>
         <div className="mb-1 flex items-center gap-2">
           <span className="text-sm font-semibold font-mono">{isIncoming ? "CS Hub AI" : "You"}</span>
           {isIncoming && (
@@ -127,29 +128,26 @@ export function ChatMessage({ role, content, isStreaming }: ChatMessageProps) {
               img({ node, ...props }) {
                 return <img alt="AI Generated" className="max-w-full h-auto rounded-lg my-4 border border-border" {...props} />;
               },
-              // NEW MOBILE-FRIENDLY TABLE IMPLEMENTATION
+              // LOCKED TABLE WIDTH: w-full and max-w-full force it to stay inside the screen
               table({ node, ...props }) {
                 return (
-                  <div className="my-4 w-full">
-                    {/* Swipe Hint - only shows on mobile (md:hidden) */}
+                  <div className="my-4 w-full max-w-full">
                     <p className="md:hidden text-xs text-primary/60 mb-2 text-center animate-pulse font-mono">
                       ↔ Swipe horizontally to view full table ↔
                     </p>
-                    <div className="overflow-x-auto rounded-md border border-border bg-accent/20">
-                      <table className="min-w-full border-collapse" {...props} />
+                    <div className="overflow-x-auto max-w-full rounded-md border border-border bg-accent/20">
+                      <table className="w-full max-w-full border-collapse" {...props} />
                     </div>
                   </div>
                 );
               },
               thead({ node, ...props }) {
-                // Sticky header for better scrolling
                 return <thead className="sticky top-0 z-10 bg-accent" {...props} />;
               },
               th({ node, ...props }) {
                 return <th className="border border-border p-3 text-left whitespace-nowrap text-xs sm:text-sm" {...props} />;
               },
               td({ node, ...props }) {
-                // Added align-top so long sentences wrap nicely at the top of the cell
                 return <td className="border border-border p-3 break-words whitespace-normal text-xs sm:text-sm align-top" {...props} />;
               }
             }}
