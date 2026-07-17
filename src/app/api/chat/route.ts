@@ -1,14 +1,8 @@
-import { NextResponse } from "next/server";
-import { OpenAIStream, StreamingTextResponse } from "ai";
-import { Configuration, OpenAIApi } from "openai-edge";
+import { openai } from '@ai-sdk/openai';
+import { streamText } from 'ai';
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-
-const config = new Configuration({
-  apiKey: process.env.OPENAI_API_KEY,
-});
-const openai = new OpenAIApi(config);
 
 export const runtime = "edge";
 
@@ -16,12 +10,14 @@ export async function POST(req: Request) {
   try {
     const session = await getServerSession(authOptions);
     if (!session) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+      return new Response(JSON.stringify({ error: "Unauthorized" }), { status: 401 });
     }
 
     const { messages, conversationId } = await req.json();
 
-    if (!conversationId) {
+    let currentConvId = conversationId;
+
+    if (!currentConvId) {
       // Create new conversation if not provided
       const newConversation = await prisma.conversation.create({
         data: {
@@ -29,54 +25,41 @@ export async function POST(req: Request) {
           title: messages[messages.length - 1].content.substring(0, 30) + "...",
         },
       });
-      messages.forEach(async (msg: any) => {
-        await prisma.message.create({
-          data: {
-            conversationId: newConversation.id,
-            role: msg.role,
-            content: msg.content,
-          },
-        });
+      currentConvId = newConversation.id;
+      
+      // Save the user's prompt
+      await prisma.message.create({
+        data: {
+          conversationId: currentConvId,
+          role: messages[messages.length - 1].role,
+          content: messages[messages.length - 1].content,
+        },
       });
     }
 
-    const response = await openai.createChatCompletion({
-      model: "gpt-4",
-      stream: true,
-      messages: [
-        {
-          role: "system",
-          content:
-            "You are Computer Science Hub AI, an elite assistant for CS students. Provide accurate, well-formatted markdown responses with syntax highlighting. Focus on programming, math, algorithms, and computer science principles.",
-        },
-        ...messages,
-      ],
+    const result = await streamText({
+      model: openai('gpt-4'),
+      system: "You are Computer Science Hub AI, an elite assistant for CS students. Provide accurate, well-formatted markdown responses with syntax highlighting. Focus on programming, math, algorithms, and computer science principles.",
+      messages: messages,
+      onFinish: async (completion) => {
+        // Save the AI's response when stream finishes
+        await prisma.message.create({
+          data: {
+            conversationId: currentConvId,
+            role: "assistant",
+            content: completion.text,
+          },
+        });
+        await prisma.conversation.update({
+          where: { id: currentConvId },
+          data: { updatedAt: new Date() },
+        });
+      }
     });
 
-    const stream = OpenAIStream(response, {
-      onCompletion: async (completion) => {
-        if (conversationId) {
-          await prisma.message.create({
-            data: {
-              conversationId,
-              role: "assistant",
-              content: completion,
-            },
-          });
-          await prisma.conversation.update({
-            where: { id: conversationId },
-            data: { updatedAt: new Date() },
-          });
-        }
-      },
-    });
-
-    return new StreamingTextResponse(stream);
+    return result.toAIStreamResponse();
   } catch (error) {
     console.error("Chat API Error:", error);
-    return NextResponse.json(
-      { error: "Internal Server Error" },
-      { status: 500 }
-    );
+    return new Response(JSON.stringify({ error: "Internal Server Error" }), { status: 500 });
   }
 }
