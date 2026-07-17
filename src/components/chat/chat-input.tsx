@@ -39,10 +39,8 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
     const reader = new FileReader();
     reader.onload = (event) => {
       const fileContent = event.target?.result as string;
-      // Append file content to the input box so the AI can read it
       setInput(prev => `${prev}\n\n[Attached File: ${file.name}]\n${fileContent}`.trim());
     };
-    // Reads text files, code files, etc.
     reader.readAsText(file); 
   };
 
@@ -66,7 +64,8 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
             onChange={(e) => setInput(e.target.value)}
             placeholder={fileName ? `Attached: ${fileName}` : "Ask anything about Computer Science..."}
             rows={1}
-            className="flex-1 resize-none bg-transparent py-3 text-sm focus:outline-none max-h-40"
+            // Added font-mono here!
+            className="flex-1 resize-none bg-transparent py-3 text-sm font-mono focus:outline-none max-h-40"
             disabled={disabled}
           />
         </div>
