@@ -21,6 +21,9 @@ export function ChatContainer() {
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  
+  // State for the typing welcome message
+  const [typedWelcome, setTypedWelcome] = useState("");
 
   useEffect(() => {
     if (status === "unauthenticated") {
@@ -31,6 +34,26 @@ export function ChatContainer() {
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
+
+  // Typing effect for the welcome message
+  useEffect(() => {
+    if (status === "authenticated" && session?.user) {
+      const role = session.user.role === "ADMIN" ? "Admin" : "";
+      const name = session.user.name || "User";
+      const fullText = `Welcome back, ${role} ${name}...`;
+      
+      let index = 0;
+      const timer = setInterval(() => {
+        if (index < fullText.length) {
+          setTypedWelcome((prev) => prev + fullText.charAt(index));
+          index++;
+        } else {
+          clearInterval(timer);
+        }
+      }, 50); // 50ms typing speed
+      return () => clearInterval(timer);
+    }
+  }, [status, session]);
 
   const handleSend = async (message: string) => {
     if (!session) return;
@@ -107,7 +130,6 @@ export function ChatContainer() {
     setMobileSidebarOpen(false);
   };
 
-  // FIX: If the app is checking login status, show a Loading screen instead of the chat page.
   if (status === "loading" || status === "unauthenticated") {
     return (
       <div className="flex h-screen items-center justify-center bg-background">
@@ -117,7 +139,8 @@ export function ChatContainer() {
   }
 
   return (
-    <div className="flex h-screen overflow-hidden bg-background text-foreground">
+    // Changed bg-background to bg-transparent so the grid shows!
+    <div className="flex h-screen overflow-hidden bg-transparent text-foreground">
       {/* Mobile Sidebar Overlay */}
       {mobileSidebarOpen && (
         <div className="fixed inset-0 z-30 bg-black/50 md:hidden" onClick={() => setMobileSidebarOpen(false)} />
@@ -144,8 +167,9 @@ export function ChatContainer() {
                   <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#39FF14" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/></svg>
                 </div>
                 <h2 className="text-2xl font-bold">Computer Science Hub AI</h2>
-                <p className="max-w-md text-foreground/60">
-                  Ask me anything about algorithms, data structures, programming languages, mathematics, and more.
+                {/* Typing Welcome Message */}
+                <p className="max-w-md text-primary/80 typing-cursor h-6 font-mono">
+                  {typedWelcome}
                 </p>
               </div>
             ) : (
