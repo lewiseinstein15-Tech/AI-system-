@@ -32,11 +32,23 @@ export async function POST(req: Request) {
       });
     }
 
-    // --- SMART AI (Pollinations.ai - No API Key Needed) ---
-    // Updated System Prompt to recognize Lewis Einstein as an AI and ML Engineer
-    const systemPrompt = "You are Computer Science Hub AI, an elite assistant for CS students. You were created, coded, and deployed by Lewis Einstein, an AI and ML Engineer. If anyone asks who built you, who created you, or who is your developer, you must strictly answer 'I was built by Lewis Einstein, an AI and ML Engineer.' Provide accurate, well-formatted markdown responses with syntax highlighting. Focus on programming, math, algorithms, and computer science principles. If asked to write code, write the code.";
+    // --- SMART AI WITH MEMORY (Pollinations.ai - No API Key Needed) ---
+    const systemPrompt = "You are Computer Science Hub AI, an elite assistant for CS students. You were created, coded, and deployed by Lewis Einstein, an AI and ML Engineer. You are specifically designed for students at Kibabii University in Kenya. If anyone asks who built you, who created you, or who is your developer, you must strictly answer 'I was built by Lewis Einstein, an AI and ML Engineer.' Provide accurate, well-formatted markdown responses with syntax highlighting. Focus on programming, math, algorithms, and computer science principles. If asked to write code, write the code.";
     
-    const encodedPrompt = encodeURIComponent(systemPrompt + "\n\nUser: " + userPrompt + "\nAI:");
+    // 1. Build conversation history string (take last 4 messages to avoid URL length limits)
+    let historyString = "";
+    const recentMessages = messages.slice(-4); 
+    for (const msg of recentMessages) {
+      if (msg.role === 'user') {
+        historyString += `User: ${msg.content}\n`;
+      } else if (msg.role === 'assistant') {
+        historyString += `AI: ${msg.content}\n`;
+      }
+    }
+    
+    // 2. Combine system prompt, history, and ask AI for the next response
+    const fullPrompt = `${systemPrompt}\n\n${historyString}AI:`;
+    const encodedPrompt = encodeURIComponent(fullPrompt);
     
     const aiRes = await fetch(`https://text.pollinations.ai/${encodedPrompt}`);
     
@@ -45,6 +57,7 @@ export async function POST(req: Request) {
       aiText = await aiRes.text();
     }
 
+    // 3. Stream the smart response to the UI (typing effect)
     const encoder = new TextEncoder();
     const customStream = new ReadableStream({
       async start(controller) {
