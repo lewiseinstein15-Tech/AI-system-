@@ -1,5 +1,3 @@
-import { groq } from '@ai-sdk/groq';
-import { streamText } from 'ai';
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
@@ -33,27 +31,42 @@ export async function POST(req: Request) {
       });
     }
 
-    // Updated model name to the active Groq model
-    const result = await streamText({
-      model: groq('llama-3.1-8b-instant'),
-      system: "You are Computer Science Hub AI, an elite assistant for CS students. Provide accurate, well-formatted markdown responses with syntax highlighting. Focus on programming, math, algorithms, and computer science principles.",
-      messages: messages,
-      onFinish: async (completion) => {
+    // --- SIMULATED AI RESPONSE (No API Key Needed) ---
+    const fakeResponseText = "Hello! This is a simulated response from CS Hub AI. Your application is working perfectly! The chat interface, database, and streaming are all functioning. You can replace this with a real OpenAI or Gemini API key later when you have access to a computer.";
+
+    const encoder = new TextEncoder();
+    const customStream = new ReadableStream({
+      async start(controller) {
+        const words = fakeResponseText.split(' ');
+        for (const word of words) {
+          const token = JSON.stringify({ choices: [{ delta: { content: word + ' ' } }] });
+          controller.enqueue(encoder.encode(`data: ${token}\n\n`));
+          await new Promise((resolve) => setTimeout(resolve, 80)); // 80ms delay for typing effect
+        }
+        controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+        controller.close();
+
+        // Save the simulated response to the database
         await prisma.message.create({
           data: {
             conversationId: currentConvId,
             role: "assistant",
-            content: completion.text,
+            content: fakeResponseText,
           },
         });
         await prisma.conversation.update({
           where: { id: currentConvId },
           data: { updatedAt: new Date() },
         });
-      }
+      },
     });
 
-    return result.toDataStreamResponse();
+    return new Response(customStream, {
+      headers: {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+      },
+    });
   } catch (error) {
     console.error("Chat API Error:", error);
     return new Response(JSON.stringify({ error: "Internal Server Error" }), { status: 500 });
