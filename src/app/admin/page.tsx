@@ -2,32 +2,39 @@
 
 import { useSession } from "next-auth/react";
 import { useRouter } from "next/navigation";
-import { Users, Database, Settings, Activity, Shield } from "lucide-react";
+import { Users, Database, Settings, Shield, BookMarked } from "lucide-react";
 import Link from "next/link";
+import { useEffect, useState } from "react";
 
 export default function AdminPage() {
   const { data: session, status } = useSession();
   const router = useRouter();
+  const [totalUsers, setTotalUsers] = useState(0);
 
-  if (status === "loading") {
-    return <div className="flex h-screen items-center justify-center bg-background">Loading...</div>;
-  }
+  useEffect(() => {
+    if (status === "unauthenticated") router.push("/login");
+    if (status === "authenticated" && session?.user?.role !== "ADMIN") router.push("/unauthorized");
 
-  if (status === "unauthenticated") {
-    router.push("/login");
-    return null;
-  }
-
-  if (session && session.user?.role !== "ADMIN") {
-    router.push("/unauthorized");
-    return null;
-  }
+    // Fetch REAL user count from the database
+    const fetchUsers = async () => {
+      try {
+        const res = await fetch("/api/admin/users");
+        if (res.ok) {
+          const data = await res.json();
+          setTotalUsers(data.length);
+        }
+      } catch (error) {
+        console.error("Failed to fetch users", error);
+      }
+    };
+    fetchUsers();
+  }, [session, status, router]);
 
   const stats = [
-    { name: "Total Users", value: "1", icon: Users, href: "/admin/users" },
-    { name: "Database Size", value: "30 MB", icon: Database, href: "/admin/database" },
-    { name: "Active Sessions", value: "1", icon: Activity, href: "/admin" },
-    { name: "Settings", value: "Configured", icon: Settings, href: "/admin/settings" },
+    { name: "Total Users", value: totalUsers.toString(), icon: Users, href: "/admin/users" },
+    { name: "Subjects", value: "Manage", icon: BookMarked, href: "/admin/subjects" },
+    { name: "Database", value: "Manage", icon: Database, href: "/admin/database" },
+    { name: "Settings", value: "Config", icon: Settings, href: "/admin/settings" },
   ];
 
   return (
@@ -35,8 +42,8 @@ export default function AdminPage() {
       <div className="flex items-center gap-3">
         <Shield className="h-8 w-8 text-primary" />
         <div>
-          <h1 className="text-3xl font-bold">Admin Dashboard</h1>
-          <p className="text-foreground/60">Welcome back, {session?.user?.name}</p>
+          <h1 className="text-3xl font-bold font-mono">Admin Dashboard</h1>
+          <p className="text-foreground/60 font-mono">Welcome back, {session?.user?.name}</p>
         </div>
       </div>
 
@@ -45,10 +52,10 @@ export default function AdminPage() {
           <Link href={stat.href} key={stat.name}>
             <div className="card hover:border-primary transition-colors cursor-pointer">
               <div className="flex items-center justify-between mb-4">
-                <h3 className="text-sm font-medium text-foreground/60">{stat.name}</h3>
+                <h3 className="text-sm font-medium text-foreground/60 font-mono">{stat.name}</h3>
                 <stat.icon className="h-5 w-5 text-primary" />
               </div>
-              <p className="text-2xl font-bold">{stat.value}</p>
+              <p className="text-2xl font-bold font-mono text-primary">{stat.value}</p>
             </div>
           </Link>
         ))}
