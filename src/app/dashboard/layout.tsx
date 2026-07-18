@@ -47,7 +47,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
             </Link>
           ))}
           
-          {/* ADMIN LINK - Only shows if the user is an Admin */}
+          {/* ADMIN LINK */}
           {session?.user?.role === "ADMIN" && (
             <Link href="/admin" onClick={() => setMenuOpen(false)} className="flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium text-primary border border-primary/30 hover:bg-primary/10 transition-colors font-mono mt-4">
               <Shield className="h-5 w-5" /> Admin Panel
@@ -62,7 +62,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       </aside>
 
       {/* Main Content */}
-      <main className="flex-1 p-8 pt-20 md:pt-8 overflow-y-auto" onClick={() => menuOpen && setMenuOpen(false)}>
+      <main className="flex-1 p-8 pt-20 md:pt-8 overflow-y-auto animate-page-fade" onClick={() => menuOpen && setMenuOpen(false)}>
         {children}
       </main>
     </div>
