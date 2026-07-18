@@ -105,7 +105,6 @@ export async function POST(req: Request) {
       currentConvId = newConversation.id;
     }
     
-    // ALWAYS save the user's prompt to the database
     await prisma.message.create({
       data: {
         conversationId: currentConvId,
@@ -164,7 +163,8 @@ export async function POST(req: Request) {
 
             const result = await generateText({
               model: groq('llama-3.1-8b-instant'),
-              messages: synthesizeMessages
+              messages: synthesizeMessages,
+              temperature: 0.3
             });
             aiText = result.text;
           } else {
@@ -195,57 +195,158 @@ export async function POST(req: Request) {
       });
     }
 
-    // --- NORMAL AI CHAT & AGENT TOOLS ---
-    const systemPrompt = `You are CS Hub AI, an elite assistant created by Lewis Einstein (AI/ML Engineer) for Kibabii University. 
-    If asked who built you, say "I was built by Lewis Einstein, an AI and ML Engineer."
-    You have full memory of this conversation. You can see the entire chat history provided to you. Do not say you don't save conversations, because your memory is handled by the system.
-    
-    You have TOOLS. When a user asks you to perform an action, you MUST output ONLY the tool command. DO NOT explain the code. DO NOT add markdown formatting around the command.
-    
-    TOOL 1: SAVE FLASHCARD
-    If user says "create flashcard", output ONLY: [ACTION:CREATE_FLASHCARD] Front: <text> | Back: <text>
-    
-    TOOL 2: SAVE NOTE
-    If user says "save note", output ONLY: [ACTION:SAVE_NOTE] Title: <text> | Content: <text>
-    
-    TOOL 3: CREATE ASSIGNMENT
-    If user says "add assignment", output ONLY: [ACTION:CREATE_ASSIGNMENT] Title: <text> | Due: <YYYY-MM-DDTHH:MM:SS>
+    // --- CODE INTERPRETER PIPELINE ---
+    // Detect if this is a coding/algorithm question
+    const isCodingQuestion = lowerUserPrompt.includes("code") || 
+                             lowerUserPrompt.includes("algorithm") || 
+                             lowerUserPrompt.includes("complexity") ||
+                             lowerUserPrompt.includes("trace") ||
+                             lowerUserPrompt.includes("solve") ||
+                             lowerUserPrompt.includes("substring") ||
+                             lowerUserPrompt.includes("string") ||
+                             lowerUserPrompt.includes("array") ||
+                             lowerUserPrompt.includes("tree") ||
+                             lowerUserPrompt.includes("graph") ||
+                             lowerUserPrompt.includes("dp") ||
+                             lowerUserPrompt.includes("dynamic programming");
 
-    CYBERSECURITY MODES:
-    If the user says "HACK THIS" or "Test Security", act as an Ethical Hacker (Red Team). Analyze the provided code, identify vulnerabilities (SQLi, XSS, RCE, etc.), and write a Proof of Concept (PoC) showing how a hacker could exploit it. Always add a warning: "For educational purposes only."
-    
-    If the user says "FIX SECURITY" or "Defend This", act as a Security Engineer (Blue Team). Analyze the code, patch all vulnerabilities, and output the secure, production-ready version of the code with comments explaining the fixes.
-    
-    If the user asks you to run or execute code, DO NOT use a tool. Just mentally trace the code and provide the expected output in a markdown code block.
-    If no tool or security mode is needed, answer normally with perfect markdown. Keep answers concise (max 800 words).`;
+    let aiText = "";
 
-    // Keep the last 10 messages for memory
-    const recentMessages = messages.slice(-10);
-    
-    const aiMessages = [
-      { role: "system", content: systemPrompt },
-      ...recentMessages.map((m: any) => {
-        let safeContent = m.content;
+    if (isCodingQuestion) {
+      // Pass 1: Force AI to write executable Python code to solve/trace it
+      const codeGenPrompt = `You are a Python code generator. The user has asked a coding question. 
+      Write a Python script that solves the problem and prints the step-by-step trace and the final answer. 
+      Do NOT explain the code. Output ONLY the Python code inside a single markdown block \`\`\`python ... \`\`\`.`;
+      
+      const codeGenMessages = [
+        { role: "system", content: codeGenPrompt },
+        ...messages.slice(-4).map((m: any) => {
+          let safeContent = m.content;
+          if (safeContent.includes("data:image")) {
+            safeContent = "[User attached an image. Please note that image analysis is currently disabled. Ask the user to describe the image instead.]";
+          }
+          return { role: m.role === "assistant" ? "assistant" : "user", content: safeContent };
+        })
+      ];
+
+      const codeResult = await generateText({
+        model: groq('llama-3.1-8b-instant'),
+        messages: codeGenMessages,
+        temperature: 0.1 // Low temperature for deterministic code
+      });
+
+      const codeMatch = codeResult.text.match(/```python\n?([\s\S]*?)```/);
+      
+      if (codeMatch && codeMatch[1]) {
+        const pythonCode = codeMatch[1].trim();
         
-        // VISION REMOVED: Replace images with text placeholder to prevent API crashes
-        if (safeContent.includes("data:image")) {
-          safeContent = "[User attached an image. Please note that image analysis is currently disabled. Ask the user to describe the image instead.]";
-        }
-        
-        if (safeContent.length > 2000) {
-          safeContent = safeContent.substring(0, 2000) + "... [truncated]";
-        }
-        return { role: m.role === "assistant" ? "assistant" : "user", content: safeContent };
-      })
-    ];
+        // Execute the code in the Piston Sandbox
+        try {
+          const pistonRes = await fetchWithTimeout("https://emkc.org/api/v2/piston/execute", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              language: "python",
+              version: "3.10.0", // Pinned version for stability
+              files: [{ name: "main.py", content: pythonCode }]
+            })
+          }, 15000);
 
-    // Use Groq for normal fast text chat
-    const result = await generateText({
-      model: groq('llama-3.1-8b-instant'),
-      messages: aiMessages
-    });
-    
-    let aiText = result.text;
+          if (pistonRes.ok) {
+            const pistonData = await pistonRes.json();
+            let executionOutput = pistonData.run.output || "No output.";
+            if (pistonData.run.stderr) executionOutput += `\nErrors:\n${pistonData.run.stderr}`;
+            
+            // Pass 2: Force AI to explain the REAL execution output
+            const explainMessages = [
+              { 
+                role: "system", 
+                content: `You are CS Hub AI. You just generated Python code to solve the user's problem and ran it in a real interpreter. Here is the ACTUAL execution output:\n\n${executionOutput}\n\nExplain this result to the user. Provide the final answer clearly, explain the approach, and provide the time/space complexity. Include the Python code you wrote in your response so the user can see it.` 
+              },
+              { role: "user", content: userPrompt }
+            ];
+
+            const explainResult = await generateText({
+              model: groq('llama-3.1-8b-instant'),
+              messages: explainMessages,
+              temperature: 0.3
+            });
+            
+            aiText = explainResult.text;
+          } else {
+            // If Piston rate limits, fallback to normal generation
+            const fallbackResult = await generateText({
+              model: groq('llama-3.1-8b-instant'),
+              messages: [
+                { role: "system", content: "You are CS Hub AI. Solve the coding problem. Provide code, trace, and complexity." },
+                { role: "user", content: userPrompt }
+              ],
+              temperature: 0.2
+            });
+            aiText = fallbackResult.text;
+          }
+        } catch (execError) {
+          // If execution fails completely, fallback to normal generation
+          const fallbackResult = await generateText({
+            model: groq('llama-3.1-8b-instant'),
+            messages: [
+              { role: "system", content: "You are CS Hub AI. Solve the coding problem. Provide code, trace, and complexity." },
+              { role: "user", content: userPrompt }
+            ],
+            temperature: 0.2
+          });
+          aiText = fallbackResult.text;
+        }
+      } else {
+        // If AI didn't write code, just answer normally
+        const fallbackResult = await generateText({
+          model: groq('llama-3.1-8b-instant'),
+          messages: [
+            { role: "system", content: "You are CS Hub AI. Answer the question." },
+            { role: "user", content: userPrompt }
+          ],
+          temperature: 0.3
+        });
+        aiText = fallbackResult.text;
+      }
+    } else {
+      // --- NORMAL AI CHAT (Non-Coding) ---
+      const systemPrompt = `You are CS Hub AI, an elite assistant created by Lewis Einstein (AI/ML Engineer) for Kibabii University. 
+      If asked who built you, say "I was built by Lewis Einstein, an AI and ML Engineer."
+      You have full memory of this conversation.
+      You have TOOLS. If you use one, output ONLY the command:
+      1. [ACTION:CREATE_FLASHCARD] Front: <text> | Back: <text>
+      2. [ACTION:SAVE_NOTE] Title: <text> | Content: <text>
+      3. [ACTION:CREATE_ASSIGNMENT] Title: <text> | Due: <YYYY-MM-DDTHH:MM:SS>
+      CYBERSECURITY MODES:
+      "HACK THIS" = Red Team analysis with PoC.
+      "FIX SECURITY" = Blue Team patched code.
+      If no tool or security mode is needed, answer normally with perfect markdown. Keep answers concise (max 800 words).`;
+
+      const recentMessages = messages.slice(-10);
+      
+      const aiMessages = [
+        { role: "system", content: systemPrompt },
+        ...recentMessages.map((m: any) => {
+          let safeContent = m.content;
+          if (safeContent.includes("data:image")) {
+            safeContent = "[User attached an image. Please note that image analysis is currently disabled. Ask the user to describe the image instead.]";
+          }
+          if (safeContent.length > 2000) {
+            safeContent = safeContent.substring(0, 2000) + "... [truncated]";
+          }
+          return { role: m.role === "assistant" ? "assistant" : "user", content: safeContent };
+        })
+      ];
+
+      const result = await generateText({
+        model: groq('llama-3.1-8b-instant'),
+        messages: aiMessages,
+        temperature: 0.5
+      });
+      
+      aiText = result.text;
+    }
 
     const lowerAiText = aiText.toLowerCase();
     
