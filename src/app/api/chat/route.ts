@@ -284,7 +284,7 @@ export async function POST(req: Request) {
       
       // Fallback: If AI didn't use the command but user asked to run code, extract from user prompt
       if (!code) {
-        const codeMatch = userPrompt.match(/```(\w+)\n([\s\S]*?)```/);
+        const codeMatch = userPrompt.match(/```(\w+)\n?([\s\S]*?)```/);
         if (codeMatch) {
           language = codeMatch[1] || "python";
           code = codeMatch[2];
@@ -293,22 +293,36 @@ export async function POST(req: Request) {
         }
       }
       
+      // Clean up code: remove markdown backticks and quote prefixes if copy-pasted
+      code = code.replace(/```(\w+)?/g, "").replace(/^>\s?/gm, "").trim();
+      
+      // Determine file extension for Piston
+      const fileExt = (language === 'javascript' || language === 'js') ? 'js' : language;
+      
       try {
         const pistonRes = await fetchWithTimeout("https://emkc.org/api/v2/piston/execute", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ language, version: "*", files: [{ content: code }] })
+          body: JSON.stringify({
+            language: language,
+            version: "*",
+            files: [{ name: `main.${fileExt}`, content: code }]
+          })
         }, 15000);
 
         if (pistonRes.ok) {
           const pistonData = await pistonRes.json();
-          const output = pistonData.run.output || "No output.";
+          let output = pistonData.run.output || "";
+          if (pistonData.run.stderr) output += `\nErrors:\n${pistonData.run.stderr}`;
+          if (!output) output = "No output.";
           aiText = `💻 **Code Executed Successfully:**\n\n\`\`\`\n${output}\n\`\`\``;
         } else {
-          aiText = "❌ I couldn't run that code. The execution engine might not support that language.";
+          const errText = await pistonRes.text();
+          console.error("Piston API Error:", errText);
+          aiText = `❌ I couldn't run that code. The execution engine returned an error: ${errText}`;
         }
       } catch (e) {
-        aiText = "❌ The code execution engine is currently unavailable.";
+        aiText = "❌ The code execution engine is currently unavailable or timed out.";
       }
     }
 
