@@ -1,6 +1,8 @@
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
+import { groq } from '@ai-sdk/groq';
+import { generateText } from 'ai';
 
 // Helper to truncate text so we don't crash the AI brain
 function truncate(str: string | null, max: number) {
@@ -20,36 +22,6 @@ async function fetchWithTimeout(url: string, options: any = {}, ms: number = 500
     clearTimeout(timeout);
     throw e;
   }
-}
-
-// --- BULLETPROOF AI BRAIN ---
-// Tries 4 different models one by one until one works
-async function getAiResponse(messages: any[]): Promise<string> {
-  const models = ["openai", "mistral", "llama", "zephyr"];
-  
-  for (const model of models) {
-    try {
-      console.log(`Trying AI model: ${model}...`);
-      const res = await fetchWithTimeout("https://text.pollinations.ai/", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ messages, model, private: true })
-      }, 30000); // 30 second timeout
-      
-      if (res.ok) {
-        const text = await res.text();
-        if (text && text.length > 5 && !text.includes("error")) {
-          console.log(`✅ Model ${model} succeeded!`);
-          return text;
-        }
-      }
-    } catch (e) {
-      console.log(`❌ Model ${model} failed, trying next...`);
-    }
-  }
-  
-  // If all models fail, return a smart fallback
-  return "I'm having trouble connecting to my AI brain right now. All 4 models are busy. Please try again in a moment, or try rephrasing your question.";
 }
 
 // --- MEGA SEARCH AGENT HELPERS ---
@@ -189,7 +161,12 @@ export async function POST(req: Request) {
               { role: "user", content: query }
             ];
 
-            aiText = await getAiResponse(synthesizeMessages);
+            // Use Groq for synthesis
+            const result = await generateText({
+              model: groq('llama-3.1-8b-instant'),
+              messages: synthesizeMessages
+            });
+            aiText = result.text;
           } else {
             aiText = `I searched Wikipedia, DuckDuckGo, Hacker News, StackOverflow, GitHub, and arXiv for "${query}", but couldn't find a direct answer. Try rephrasing your search.`;
           }
@@ -220,7 +197,7 @@ export async function POST(req: Request) {
 
     // --- NORMAL AI CHAT & AGENT TOOLS ---
     const systemPrompt = `You are CS Hub AI, an elite assistant created by Lewis Einstein (AI/ML Engineer) for Kibabii University. 
-    If asked who built you, say "I was built by Lewis Einstein."
+    If asked who built you, say "I was built by Lewis Einstein, an AI and ML Engineer."
     You have COMMANDS. If you use one, output ONLY the command (NO JSON, NO markdown):
     1. [ACTION:CREATE_FLASHCARD] Front: <text> | Back: <text>
     2. [ACTION:SAVE_NOTE] Title: <text> | Content: <text>
@@ -228,7 +205,6 @@ export async function POST(req: Request) {
     4. [ACTION:RUN_CODE] <language> \n <code>
     If no command is needed, answer normally. Keep answers concise (max 800 words).`;
 
-    // Limit conversation history to last 6 messages to prevent token overload
     const recentMessages = messages.slice(-6);
     
     const aiMessages = [
@@ -238,7 +214,6 @@ export async function POST(req: Request) {
         if (safeContent.includes("data:image")) {
           safeContent = safeContent.replace(/data:image\/[^;]+;base64,[^"\\)]+/g, "[User attached an image]");
         }
-        // Truncate individual messages to prevent token overload
         if (safeContent.length > 2000) {
           safeContent = safeContent.substring(0, 2000) + "... [truncated]";
         }
@@ -246,8 +221,13 @@ export async function POST(req: Request) {
       })
     ];
 
-    // Use the bulletproof AI brain!
-    let aiText = await getAiResponse(aiMessages);
+    // Use Groq for normal chat
+    const result = await generateText({
+      model: groq('llama-3.1-8b-instant'),
+      messages: aiMessages
+    });
+    
+    let aiText = result.text;
 
     const lowerAiText = aiText.toLowerCase();
     
