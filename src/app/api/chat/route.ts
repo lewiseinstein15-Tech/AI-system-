@@ -32,22 +32,16 @@ export async function POST(req: Request) {
       });
     }
 
-    // --- AGENT SYSTEM PROMPT ---
-    // Strictly forbade JSON so it uses our simple text format
-    const systemPrompt = `You are Computer Science Hub AI, an elite agent for CS students. You were created by Lewis Einstein, an AI and ML Engineer, for Kibabii University.
-    
-    You have special COMMANDS you can use. If you want to use a command, your ENTIRE response must be ONLY the command text. DO NOT use JSON. DO NOT use markdown.
-    
-    COMMAND 1: SAVE FLASHCARD
-    Format exactly like this: [ACTION:CREATE_FLASHCARD] Front: <front text> | Back: <back text>
-    
-    COMMAND 2: SAVE NOTE
-    Format exactly like this: [ACTION:SAVE_NOTE] Title: <title text> | Content: <content text>
-    
-    COMMAND 3: SEARCH WEB
-    Format exactly like this: [ACTION:SEARCH_WEB] <search query>
-    
-    If the user does NOT ask to save a note, save a flashcard, or search the web, just answer their question normally with perfect markdown.`;
+    // --- OPTIMIZED AGENT PROMPT ---
+    const systemPrompt = `You are CS Hub AI, an elite assistant created by Lewis Einstein (AI/ML Engineer) for Kibabii University. 
+    If asked who built you, say "I was built by Lewis Einstein."
+    You have COMMANDS. If you use one, output ONLY the command (NO JSON, NO markdown):
+    1. [ACTION:CREATE_FLASHCARD] Front: <text> | Back: <text>
+    2. [ACTION:SAVE_NOTE] Title: <text> | Content: <text>
+    3. [ACTION:CREATE_ASSIGNMENT] Title: <text> | Due: <YYYY-MM-DDTHH:MM:SS>
+    4. [ACTION:SEARCH_WEB] <query>
+    5. [ACTION:RUN_CODE] <language> \n <code>
+    If no command is needed, answer normally.`;
 
     const aiMessages = [
       { role: "system", content: systemPrompt },
@@ -60,46 +54,84 @@ export async function POST(req: Request) {
       })
     ];
 
-    const aiRes = await fetch("https://text.pollinations.ai/", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ messages: aiMessages, model: "openai", private: true })
-    });
-    
-    let aiText = "I couldn't connect to the AI brain right now. Please try again.";
-    if (aiRes.ok) {
-      aiText = await aiRes.text();
+    // --- SMART AI CALL WITH FALLBACK ---
+    let aiText = "";
+    try {
+      const aiRes = await fetch("https://text.pollinations.ai/", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ messages: aiMessages, model: "openai", private: true })
+      });
+      
+      if (aiRes.ok) {
+        aiText = await aiRes.text();
+      } else {
+        throw new Error("AI API returned an error");
+      }
+    } catch (err) {
+      // If the AI brain crashes, fallback to Mistral model
+      try {
+        const fallbackRes = await fetch("https://text.pollinations.ai/", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ messages: aiMessages, model: "mistral", private: true })
+        });
+        if (fallbackRes.ok) {
+          aiText = await fallbackRes.text();
+        } else {
+          aiText = "I'm having trouble connecting to my AI brain right now. Please try again in a moment.";
+        }
+      } catch (err2) {
+         aiText = "I'm having trouble connecting to my AI brain right now. Please try again in a moment.";
+      }
     }
 
-    // --- AGENT ACTION INTERCEPTOR (Smarter Regex) ---
+    // --- AGENT ACTION INTERCEPTOR ---
     const lowerAiText = aiText.toLowerCase();
+    const lowerUserPrompt = userPrompt.toLowerCase();
     
-    if (lowerAiText.includes("action:create_flashcard")) {
-      // Look for Front: and Back: anywhere in the text
+    // 1. Flashcard
+    if (lowerAiText.includes("action:create_flashcard") || (lowerUserPrompt.includes("create") && lowerUserPrompt.includes("flashcard"))) {
       const match = aiText.match(/Front:\s*(.*?)\s*\|\s*Back:\s*(.*)/i);
-      if (match) {
-        await prisma.flashcard.create({
-          data: { front: match[1].trim(), back: match[2].trim(), userId: session.user.id }
-        });
+      // If AI didn't provide the format, extract from user prompt
+      const front = match?.[1] || userPrompt.split("Front:")[1]?.split("|")[0]?.trim() || "";
+      const back = match?.[2] || userPrompt.split("Back:")[1]?.trim() || "";
+      if (front && back) {
+        await prisma.flashcard.create({ data: { front, back, userId: session.user.id } });
         aiText = "✅ **Agent Action:** I have successfully created and saved that flashcard to your Dashboard!";
       }
     } 
-    else if (lowerAiText.includes("action:save_note")) {
+    // 2. Note
+    else if (lowerAiText.includes("action:save_note") || (lowerUserPrompt.includes("save") && lowerUserPrompt.includes("note"))) {
       const match = aiText.match(/Title:\s*(.*?)\s*\|\s*Content:\s*(.*)/i);
-      if (match) {
-        await prisma.note.create({
-          data: { title: match[1].trim(), content: match[2].trim(), userId: session.user.id }
-        });
+      const title = match?.[1] || userPrompt.split("Title:")[1]?.split("|")[0]?.trim() || "Untitled Note";
+      const content = match?.[2] || userPrompt.split("Content:")[1]?.trim() || "";
+      if (title && content) {
+        await prisma.note.create({ data: { title, content, userId: session.user.id } });
         aiText = "✅ **Agent Action:** I have successfully saved that note to your Dashboard!";
       }
     } 
-    else if (lowerAiText.includes("action:search_web")) {
-      // Extract the query after the action tag
+    // 3. Assignment
+    else if (lowerAiText.includes("action:create_assignment") || (lowerUserPrompt.includes("add") && lowerUserPrompt.includes("assignment"))) {
+      const match = aiText.match(/Title:\s*(.*?)\s*\|\s*Due:\s*(.*)/i);
+      const title = match?.[1] || userPrompt.split("Title:")[1]?.split("|")[0]?.trim() || "Untitled Assignment";
+      const dueStr = match?.[2] || userPrompt.split("Due:")[1]?.trim() || new Date().toISOString();
+      const dueDate = new Date(dueStr);
+      if (!isNaN(dueDate.getTime())) {
+        await prisma.assignment.create({ data: { title, dueDate, userId: session.user.id } });
+        aiText = "✅ **Agent Action:** I have successfully scheduled that assignment in your Dashboard!";
+      }
+    }
+    // 4. Web Search (With Fallback!)
+    else if (lowerAiText.includes("action:search_web") || lowerUserPrompt.includes("search the web")) {
       let query = aiText.replace(/.*action:search_web\]/i, "").trim();
-      // Remove any quotes or extra text
+      if (!query || query.startsWith("i couldn't")) {
+        // If AI failed, extract query from user prompt
+        query = userPrompt.replace(/.*search the web for/i, "").trim();
+      }
       query = query.replace(/["']/g, "").trim();
       
-      // 1. Search Wikipedia (Free, no API key)
+      // Search Wikipedia directly
       const searchRes = await fetch(`https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(query)}&format=json&origin=*`);
       const searchData = await searchRes.json();
       
@@ -113,7 +145,31 @@ export async function POST(req: Request) {
           searchResultText = `🔍 I searched the live internet and found this regarding **${topTitle}**:\n\n${summaryData.extract}\n\n*(Source: Wikipedia Live API)*`;
         }
       }
-      aiText = searchResultText;
+      aiText = searchResultText; // Override AI text with actual search results
+    }
+    // 5. Run Code
+    else if (lowerAiText.includes("action:run_code") || lowerUserPrompt.includes("run code")) {
+      const match = aiText.match(/action:run_code\]\s*(\w+)\s*\n([\s\S]*)/i);
+      const language = match?.[1] || "python";
+      const code = match?.[2] || userPrompt.replace(/.*run this.*code/i, "").replace(/```python|```/g, "").trim();
+      
+      try {
+        const pistonRes = await fetch("https://emkc.org/api/v2/piston/execute", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ language, version: "*", files: [{ content: code }] })
+        });
+
+        if (pistonRes.ok) {
+          const pistonData = await pistonRes.json();
+          const output = pistonData.run.output || "No output.";
+          aiText = `💻 **Code Executed Successfully:**\n\n\`\`\`\n${output}\n\`\`\``;
+        } else {
+          aiText = "❌ I couldn't run that code. The execution engine might not support that language.";
+        }
+      } catch (e) {
+        aiText = "❌ The code execution engine is currently unavailable.";
+      }
     }
 
     // --- STREAM RESPONSE TO UI ---
