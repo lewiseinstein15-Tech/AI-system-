@@ -210,9 +210,14 @@ export async function POST(req: Request) {
     
     TOOL 3: CREATE ASSIGNMENT
     If user says "add assignment", output ONLY: [ACTION:CREATE_ASSIGNMENT] Title: <text> | Due: <YYYY-MM-DDTHH:MM:SS>
+
+    CYBERSECURITY MODES:
+    If the user says "HACK THIS" or "Test Security", act as an Ethical Hacker (Red Team). Analyze the provided code, identify vulnerabilities (SQLi, XSS, RCE, etc.), and write a Proof of Concept (PoC) showing how a hacker could exploit it. Always add a warning: "For educational purposes only."
+    
+    If the user says "FIX SECURITY" or "Defend This", act as a Security Engineer (Blue Team). Analyze the code, patch all vulnerabilities, and output the secure, production-ready version of the code with comments explaining the fixes.
     
     If the user asks you to run or execute code, DO NOT use a tool. Just mentally trace the code and provide the expected output in a markdown code block.
-    If no command is needed, answer normally with perfect markdown. Keep answers concise (max 800 words).`;
+    If no tool or security mode is needed, answer normally with perfect markdown. Keep answers concise (max 800 words).`;
 
     // Keep the last 10 messages for memory
     const recentMessages = messages.slice(-10);
