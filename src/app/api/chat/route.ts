@@ -226,9 +226,24 @@ export async function POST(req: Request) {
       { role: "system", content: systemPrompt },
       ...recentMessages.map((m: any) => {
         let safeContent = m.content;
+        
+        // VISION: If the message contains an image, format it for the Vision model
         if (safeContent.includes("data:image")) {
-          safeContent = safeContent.replace(/data:image\/[^;]+;base64,[^"\\)]+/g, "[User attached an image]");
+          const base64Match = safeContent.match(/data:image\/[^;]+;base64,[^"\\)]+/g);
+          if (base64Match) {
+            const imageUrl = base64Match[0];
+            const textContent = safeContent.replace(/\[Attached Image:.*?\]/, "").replace(imageUrl, "").trim();
+            
+            return {
+              role: m.role === "assistant" ? "assistant" : "user",
+              content: [
+                { type: "text", text: textContent || "What is in this image?" },
+                { type: "image_url", image_url: imageUrl }
+              ]
+            };
+          }
         }
+        
         if (safeContent.length > 2000) {
           safeContent = safeContent.substring(0, 2000) + "... [truncated]";
         }
@@ -236,9 +251,11 @@ export async function POST(req: Request) {
       })
     ];
 
-    // Use Groq for normal chat
+    // Use Groq for normal chat. If an image is present, use the Vision model.
+    const hasImage = aiMessages.some((m: any) => Array.isArray(m.content) && m.content.some((c: any) => c.type === "image_url"));
+    
     const result = await generateText({
-      model: groq('llama-3.1-8b-instant'),
+      model: groq(hasImage ? 'llama-3.2-11b-vision-preview' : 'llama-3.1-8b-instant'),
       messages: aiMessages
     });
     
