@@ -52,6 +52,11 @@ export default function DashboardPage() {
     fetchDashboardData();
   }, [session, status, router]);
 
+  const handleTopicClick = (topic: string) => {
+    // Route to the chat page and pass the topic as a query parameter
+    router.push(`/?prompt=${encodeURIComponent("Give me a comprehensive overview of " + topic + " with examples.")}`);
+  };
+
   return (
     <div className="min-h-screen bg-background p-8">
       <div className="mx-auto max-w-7xl space-y-8">
@@ -85,7 +90,6 @@ export default function DashboardPage() {
             <p className="text-3xl font-bold font-mono text-primary">{stats.assignments}</p>
           </div>
 
-          {/* Changed from fake Progress to real Flashcards count */}
           <div className="card hover:border-primary transition-colors">
             <div className="flex items-center justify-between mb-4">
               <h3 className="text-sm font-medium text-foreground/60 font-mono">Flashcards</h3>
@@ -121,9 +125,13 @@ export default function DashboardPage() {
             <h3 className="mb-4 text-lg font-semibold font-mono text-primary">Recommended Topics</h3>
             <div className="space-y-3">
               {["Dynamic Programming", "Neural Networks", "System Design", "Graph Algorithms"].map((topic) => (
-                <div key={topic} className="cursor-pointer rounded-md border border-border p-3 hover:border-primary hover:bg-primary/5 transition-all">
+                <div 
+                  key={topic} 
+                  onClick={() => handleTopicClick(topic)}
+                  className="cursor-pointer rounded-md border border-border p-3 hover:border-primary hover:bg-primary/5 transition-all"
+                >
                   <p className="text-sm font-medium font-mono">{topic}</p>
-                  <p className="text-xs text-foreground/40 font-mono">Recommended for you</p>
+                  <p className="text-xs text-foreground/40 font-mono">Tap to learn this topic</p>
                 </div>
               ))}
             </div>
