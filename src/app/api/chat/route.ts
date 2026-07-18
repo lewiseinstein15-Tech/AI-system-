@@ -96,7 +96,6 @@ export async function POST(req: Request) {
     let currentConvId = conversationId;
 
     if (!currentConvId) {
-      // Create new conversation if it doesn't exist
       const newConversation = await prisma.conversation.create({
         data: {
           userId: session.user.id,
@@ -106,7 +105,7 @@ export async function POST(req: Request) {
       currentConvId = newConversation.id;
     }
     
-    // BUG FIX: ALWAYS save the user's prompt to the database, whether it's a new or existing chat
+    // ALWAYS save the user's prompt to the database
     await prisma.message.create({
       data: {
         conversationId: currentConvId,
@@ -197,16 +196,26 @@ export async function POST(req: Request) {
     }
 
     // --- NORMAL AI CHAT & AGENT TOOLS ---
-    // Updated system prompt to explicitly tell the AI it has memory
     const systemPrompt = `You are CS Hub AI, an elite assistant created by Lewis Einstein (AI/ML Engineer) for Kibabii University. 
     If asked who built you, say "I was built by Lewis Einstein, an AI and ML Engineer."
     You have full memory of this conversation. You can see the entire chat history provided to you. Do not say you don't save conversations, because your memory is handled by the system.
-    You have COMMANDS. If you use one, output ONLY the command (NO JSON, NO markdown):
-    1. [ACTION:CREATE_FLASHCARD] Front: <text> | Back: <text>
-    2. [ACTION:SAVE_NOTE] Title: <text> | Content: <text>
-    3. [ACTION:CREATE_ASSIGNMENT] Title: <text> | Due: <YYYY-MM-DDTHH:MM:SS>
-    4. [ACTION:RUN_CODE] <language> \n <code>
-    If no command is needed, answer normally. Keep answers concise (max 800 words).`;
+    
+    You have TOOLS. When a user asks you to perform an action, you MUST output ONLY the tool command. DO NOT explain the code. DO NOT add markdown formatting around the command.
+    
+    TOOL 1: SAVE FLASHCARD
+    If user says "create flashcard", output ONLY: [ACTION:CREATE_FLASHCARD] Front: <text> | Back: <text>
+    
+    TOOL 2: SAVE NOTE
+    If user says "save note", output ONLY: [ACTION:SAVE_NOTE] Title: <text> | Content: <text>
+    
+    TOOL 3: CREATE ASSIGNMENT
+    If user says "add assignment", output ONLY: [ACTION:CREATE_ASSIGNMENT] Title: <text> | Due: <YYYY-MM-DDTHH:MM:SS>
+    
+    TOOL 4: RUN CODE
+    If user says "run code" or "execute code", output ONLY: [ACTION:RUN_CODE] <language>
+    <code>
+    
+    If the user does NOT ask to save a note, flashcard, assignment, or run code, answer normally with perfect markdown. Keep answers concise (max 800 words).`;
 
     // Keep the last 10 messages for memory
     const recentMessages = messages.slice(-10);
@@ -267,10 +276,22 @@ export async function POST(req: Request) {
       }
     }
     // 4. Run Code
-    else if (lowerAiText.includes("action:run_code") || lowerUserPrompt.includes("run code")) {
+    else if (lowerAiText.includes("action:run_code") || lowerUserPrompt.includes("run code") || lowerUserPrompt.includes("execute code")) {
+      // Extract language and code from AI command first
       const match = aiText.match(/action:run_code\]\s*(\w+)\s*\n([\s\S]*)/i);
-      const language = match?.[1] || "python";
-      const code = match?.[2] || userPrompt.replace(/.*run this.*code/i, "").replace(/```python|```/g, "").trim();
+      let language = match?.[1] || "python";
+      let code = match?.[2] || "";
+      
+      // Fallback: If AI didn't use the command but user asked to run code, extract from user prompt
+      if (!code) {
+        const codeMatch = userPrompt.match(/```(\w+)\n([\s\S]*?)```/);
+        if (codeMatch) {
+          language = codeMatch[1] || "python";
+          code = codeMatch[2];
+        } else {
+          code = userPrompt.replace(/.*run this.*code/i, "").replace(/```python|```/g, "").trim();
+        }
+      }
       
       try {
         const pistonRes = await fetchWithTimeout("https://emkc.org/api/v2/piston/execute", {
