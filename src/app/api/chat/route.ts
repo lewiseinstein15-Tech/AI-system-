@@ -2,6 +2,65 @@ import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 
+// --- MEGA SEARCH AGENT HELPERS ---
+async function searchWiki(query: string) {
+  const searchRes = await fetch(`https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(query)}&format=json&origin=*`);
+  const searchData = await searchRes.json();
+  if (searchData.query?.search?.length > 0) {
+    const title = searchData.query.search[0].title;
+    const sumRes = await fetch(`https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(title)}`);
+    const sumData = await sumRes.json();
+    if (sumData.extract) return `Wikipedia: ${sumData.extract}`;
+  }
+  return null;
+}
+
+async function searchDdg(query: string) {
+  const res = await fetch(`https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1&skip_disambig=1`);
+  const data = await res.json();
+  if (data.AbstractText) return `DuckDuckGo: ${data.AbstractText}`;
+  if (data.RelatedTopics?.[0]?.Text) return `DuckDuckGo: ${data.RelatedTopics[0].Text}`;
+  return null;
+}
+
+async function searchHn(query: string) {
+  const res = await fetch(`https://hn.algolia.com/api/v1/search?query=${encodeURIComponent(query)}&tags=story&hitsPerPage=2`);
+  const data = await res.json();
+  if (data.hits?.length > 0) {
+    const text = data.hits.map((h: any) => `Title: ${h.title}`).join(' | ');
+    return `Hacker News: ${text}`;
+  }
+  return null;
+}
+
+async function searchSo(query: string) {
+  const res = await fetch(`https://api.stackexchange.com/2.3/search/advanced?order=desc&sort=relevance&q=${encodeURIComponent(query)}&site=stackoverflow&pagesize=2`);
+  const data = await res.json();
+  if (data.items?.length > 0) {
+    const text = data.items.map((i: any) => `Q: ${i.title}`).join(' | ');
+    return `StackOverflow: ${text}`;
+  }
+  return null;
+}
+
+async function searchGh(query: string) {
+  const res = await fetch(`https://api.github.com/search/repositories?q=${encodeURIComponent(query)}&sort=stars&order=desc&per_page=2`);
+  const data = await res.json();
+  if (data.items?.length > 0) {
+    const text = data.items.map((i: any) => `Repo: ${i.full_name} - ${i.description}`).join(' | ');
+    return `GitHub: ${text}`;
+  }
+  return null;
+}
+
+async function searchArxiv(query: string) {
+  const res = await fetch(`https://export.arxiv.org/api/query?search_query=all:${encodeURIComponent(query)}&max_results=2`);
+  const xmlText = await res.text();
+  const titles = [...xmlText.matchAll(/<title>(.*?)<\/title>/g)].map(m => m[1]).filter(t => t !== "arXiv Query Result");
+  if (titles.length > 0) return `arXiv Papers: ${titles.join(' | ')}`;
+  return null;
+}
+
 export async function POST(req: Request) {
   try {
     const session = await getServerSession(authOptions);
@@ -32,7 +91,6 @@ export async function POST(req: Request) {
       });
     }
 
-    // --- OPTIMIZED AGENT PROMPT ---
     const systemPrompt = `You are CS Hub AI, an elite assistant created by Lewis Einstein (AI/ML Engineer) for Kibabii University. 
     If asked who built you, say "I was built by Lewis Einstein."
     You have COMMANDS. If you use one, output ONLY the command (NO JSON, NO markdown):
@@ -54,7 +112,6 @@ export async function POST(req: Request) {
       })
     ];
 
-    // --- SMART AI CALL WITH FALLBACK ---
     let aiText = "";
     try {
       const aiRes = await fetch("https://text.pollinations.ai/", {
@@ -69,7 +126,6 @@ export async function POST(req: Request) {
         throw new Error("AI API returned an error");
       }
     } catch (err) {
-      // If the AI brain crashes, fallback to Mistral model
       try {
         const fallbackRes = await fetch("https://text.pollinations.ai/", {
           method: "POST",
@@ -86,14 +142,12 @@ export async function POST(req: Request) {
       }
     }
 
-    // --- AGENT ACTION INTERCEPTOR ---
     const lowerAiText = aiText.toLowerCase();
     const lowerUserPrompt = userPrompt.toLowerCase();
     
     // 1. Flashcard
     if (lowerAiText.includes("action:create_flashcard") || (lowerUserPrompt.includes("create") && lowerUserPrompt.includes("flashcard"))) {
       const match = aiText.match(/Front:\s*(.*?)\s*\|\s*Back:\s*(.*)/i);
-      // If AI didn't provide the format, extract from user prompt
       const front = match?.[1] || userPrompt.split("Front:")[1]?.split("|")[0]?.trim() || "";
       const back = match?.[2] || userPrompt.split("Back:")[1]?.trim() || "";
       if (front && back) {
@@ -122,30 +176,96 @@ export async function POST(req: Request) {
         aiText = "✅ **Agent Action:** I have successfully scheduled that assignment in your Dashboard!";
       }
     }
-    // 4. Web Search (With Fallback!)
+    // 4. MEGA WEB SEARCH (WITH LIVE UI STEPS)
     else if (lowerAiText.includes("action:search_web") || lowerUserPrompt.includes("search the web")) {
       let query = aiText.replace(/.*action:search_web\]/i, "").trim();
       if (!query || query.startsWith("i couldn't")) {
-        // If AI failed, extract query from user prompt
         query = userPrompt.replace(/.*search the web for/i, "").trim();
       }
       query = query.replace(/["']/g, "").trim();
       
-      // Search Wikipedia directly
-      const searchRes = await fetch(`https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(query)}&format=json&origin=*`);
-      const searchData = await searchRes.json();
-      
-      let searchResultText = `I searched the live internet for "${query}", but couldn't find a direct answer.`;
+      const encoder = new TextEncoder();
+      const searchStream = new ReadableStream({
+        async start(controller) {
+          const sendStep = (step: string) => {
+            const token = JSON.stringify({ searchStep: step });
+            controller.enqueue(encoder.encode(`data: ${token}\n\n`));
+          };
+          
+          // 1. Send the searching steps to the UI instantly
+          sendStep("Wikipedia");
+          sendStep("DuckDuckGo");
+          sendStep("Hacker News");
+          sendStep("StackOverflow");
+          sendStep("GitHub");
+          sendStep("arXiv");
+          
+          // 2. Actually perform the searches
+          const [wiki, ddg, hn, so, gh, arxiv] = await Promise.all([
+            searchWiki(query).catch(() => null),
+            searchDdg(query).catch(() => null),
+            searchHn(query).catch(() => null),
+            searchSo(query).catch(() => null),
+            searchGh(query).catch(() => null),
+            searchArxiv(query).catch(() => null)
+          ]);
 
-      if (searchData.query && searchData.query.search.length > 0) {
-        const topTitle = searchData.query.search[0].title;
-        const summaryRes = await fetch(`https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(topTitle)}`);
-        const summaryData = await summaryRes.json();
-        if (summaryData.extract) {
-          searchResultText = `🔍 I searched the live internet and found this regarding **${topTitle}**:\n\n${summaryData.extract}\n\n*(Source: Wikipedia Live API)*`;
+          let searchContext = "";
+          if (wiki) searchContext += `${wiki}\n\n`;
+          if (ddg) searchContext += `${ddg}\n\n`;
+          if (hn) searchContext += `${hn}\n\n`;
+          if (so) searchContext += `${so}\n\n`;
+          if (gh) searchContext += `${gh}\n\n`;
+          if (arxiv) searchContext += `${arxiv}\n\n`;
+
+          if (searchContext) {
+            const synthesizeMessages = [
+              { role: "system", content: `You just searched 6 live internet sources (Wikipedia, DuckDuckGo, Hacker News, StackOverflow, GitHub, arXiv) for "${query}". Here are the raw search results:\n\n${searchContext}\n\nPlease read these results and give the user a smart, well-formatted summary answering their query. Mention which sources you found the information from.` },
+              { role: "user", content: query }
+            ];
+
+            try {
+              const synthesizeRes = await fetch("https://text.pollinations.ai/", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ messages: synthesizeMessages, model: "openai", private: true })
+              });
+              if (synthesizeRes.ok) {
+                aiText = await synthesizeRes.text();
+              } else {
+                aiText = `🔍 I searched the web and found this:\n\n${searchContext}`;
+              }
+            } catch (e) {
+              aiText = `🔍 I searched the web and found this:\n\n${searchContext}`;
+            }
+          } else {
+            aiText = `I searched Wikipedia, DuckDuckGo, Hacker News, StackOverflow, GitHub, and arXiv for "${query}", but couldn't find a direct answer.`;
+          }
+
+          // 3. Stream the final text answer
+          const words = aiText.split(' ');
+          for (const word of words) {
+            const token = JSON.stringify({ choices: [{ delta: { content: word + ' ' } }] });
+            controller.enqueue(encoder.encode(`data: ${token}\n\n`));
+            await new Promise((resolve) => setTimeout(resolve, 50));
+          }
+          
+          controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+          controller.close();
+
+          await prisma.message.create({
+            data: { conversationId: currentConvId, role: "assistant", content: aiText }
+          });
+          await prisma.conversation.update({
+            where: { id: currentConvId },
+            data: { updatedAt: new Date() }
+          });
         }
-      }
-      aiText = searchResultText; // Override AI text with actual search results
+      });
+
+      return new Response(searchStream, {
+        headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' }
+      });
     }
     // 5. Run Code
     else if (lowerAiText.includes("action:run_code") || lowerUserPrompt.includes("run code")) {
