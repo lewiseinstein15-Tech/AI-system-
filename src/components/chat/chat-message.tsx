@@ -1,7 +1,7 @@
 "use client";
 
 import { cn } from "@/lib/utils";
-import { User, Bot, Check, Copy, Volume2, Square } from "lucide-react";
+import { User, Bot, Check, Copy, Volume2, Square, Search, CheckCircle2 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { vscDarkPlus } from "react-syntax-highlighter/dist/esm/styles/prism";
@@ -12,6 +12,7 @@ interface ChatMessageProps {
   role: "user" | "assistant" | "system";
   content: string;
   isStreaming?: boolean;
+  searchSteps?: string[];
 }
 
 const MermaidRenderer = ({ code }: { code: string }) => {
@@ -38,7 +39,7 @@ const MermaidRenderer = ({ code }: { code: string }) => {
   return <pre className="my-4 p-4 bg-accent rounded-lg overflow-x-auto"><code>{code}</code></pre>;
 };
 
-export function ChatMessage({ role, content, isStreaming }: ChatMessageProps) {
+export function ChatMessage({ role, content, isStreaming, searchSteps }: ChatMessageProps) {
   const [copied, setCopied] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
 
@@ -48,14 +49,13 @@ export function ChatMessage({ role, content, isStreaming }: ChatMessageProps) {
     setTimeout(() => setCopied(false), 2000);
   };
 
-  // Clean up markdown so the voice sounds natural
   const cleanTextForSpeech = (text: string) => {
     return text
-      .replace(/```[a-zA-Z]*\n?|\n```/g, ' ') // remove code block ticks
-      .replace(/`([^`]*)`/g, '$1') // remove inline code ticks
-      .replace(/[*_#>]/g, '') // remove markdown symbols
-      .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1') // read link text instead of url
-      .replace(/\n/g, '. '); // pause at line breaks
+      .replace(/```[a-zA-Z]*\n?|\n```/g, ' ')
+      .replace(/`([^`]*)`/g, '$1')
+      .replace(/[*_#>]/g, '')
+      .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
+      .replace(/\n/g, '. ');
   };
 
   const handleSpeak = () => {
