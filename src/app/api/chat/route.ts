@@ -211,11 +211,8 @@ export async function POST(req: Request) {
     TOOL 3: CREATE ASSIGNMENT
     If user says "add assignment", output ONLY: [ACTION:CREATE_ASSIGNMENT] Title: <text> | Due: <YYYY-MM-DDTHH:MM:SS>
     
-    TOOL 4: RUN CODE
-    If user says "run code" or "execute code", output ONLY: [ACTION:RUN_CODE] <language>
-    <code>
-    
-    If the user does NOT ask to save a note, flashcard, assignment, or run code, answer normally with perfect markdown. Keep answers concise (max 800 words).`;
+    If the user asks you to run or execute code, DO NOT use a tool. Just mentally trace the code and provide the expected output in a markdown code block.
+    If no command is needed, answer normally with perfect markdown. Keep answers concise (max 800 words).`;
 
     // Keep the last 10 messages for memory
     const recentMessages = messages.slice(-10);
@@ -273,56 +270,6 @@ export async function POST(req: Request) {
       if (!isNaN(dueDate.getTime())) {
         await prisma.assignment.create({ data: { title, dueDate, userId: session.user.id } });
         aiText = "✅ **Agent Action:** I have successfully scheduled that assignment in your Dashboard!";
-      }
-    }
-    // 4. Run Code
-    else if (lowerAiText.includes("action:run_code") || lowerUserPrompt.includes("run code") || lowerUserPrompt.includes("execute code")) {
-      // Extract language and code from AI command first
-      const match = aiText.match(/action:run_code\]\s*(\w+)\s*\n([\s\S]*)/i);
-      let language = match?.[1] || "python";
-      let code = match?.[2] || "";
-      
-      // Fallback: If AI didn't use the command but user asked to run code, extract from user prompt
-      if (!code) {
-        const codeMatch = userPrompt.match(/```(\w+)\n?([\s\S]*?)```/);
-        if (codeMatch) {
-          language = codeMatch[1] || "python";
-          code = codeMatch[2];
-        } else {
-          code = userPrompt.replace(/.*run this.*code/i, "").replace(/```python|```/g, "").trim();
-        }
-      }
-      
-      // Clean up code: remove markdown backticks and quote prefixes if copy-pasted
-      code = code.replace(/```(\w+)?/g, "").replace(/^>\s?/gm, "").trim();
-      
-      // Determine file extension for Piston
-      const fileExt = (language === 'javascript' || language === 'js') ? 'js' : language;
-      
-      try {
-        const pistonRes = await fetchWithTimeout("https://emkc.org/api/v2/piston/execute", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            language: language,
-            version: "*",
-            files: [{ name: `main.${fileExt}`, content: code }]
-          })
-        }, 15000);
-
-        if (pistonRes.ok) {
-          const pistonData = await pistonRes.json();
-          let output = pistonData.run.output || "";
-          if (pistonData.run.stderr) output += `\nErrors:\n${pistonData.run.stderr}`;
-          if (!output) output = "No output.";
-          aiText = `💻 **Code Executed Successfully:**\n\n\`\`\`\n${output}\n\`\`\``;
-        } else {
-          const errText = await pistonRes.text();
-          console.error("Piston API Error:", errText);
-          aiText = `❌ I couldn't run that code. The execution engine returned an error: ${errText}`;
-        }
-      } catch (e) {
-        aiText = "❌ The code execution engine is currently unavailable or timed out.";
       }
     }
 
