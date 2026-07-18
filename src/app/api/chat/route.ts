@@ -229,16 +229,17 @@ export async function POST(req: Request) {
         
         // VISION: If the message contains an image, format it for the Vision model
         if (safeContent.includes("data:image")) {
-          const base64Match = safeContent.match(/data:image\/[^;]+;base64,[^"\\)]+/g);
+          // Extract the base64 data and the media type
+          const base64Match = safeContent.match(/data:image\/([^;]+);base64,(.*?)(?="|'|\n|$)/);
           if (base64Match) {
-            const imageUrl = base64Match[0];
-            const textContent = safeContent.replace(/\[Attached Image:.*?\]/, "").replace(imageUrl, "").trim();
+            const base64Data = base64Match[2]; // The raw base64 string
+            const textContent = safeContent.replace(/\[Attached Image:.*?\]/, "").replace(base64Match[0], "").trim();
             
             return {
               role: m.role === "assistant" ? "assistant" : "user",
               content: [
                 { type: "text", text: textContent || "What is in this image?" },
-                { type: "image_url", image_url: { url: imageUrl } } // FIXED FORMATTING
+                { type: "image", image: base64Data } // FIXED: AI SDK native format
               ]
             };
           }
@@ -252,14 +253,24 @@ export async function POST(req: Request) {
     ];
 
     // Use Groq for normal chat. If an image is present, use the Vision model.
-    const hasImage = aiMessages.some((m: any) => Array.isArray(m.content) && m.content.some((c: any) => c.type === "image_url"));
+    const hasImage = aiMessages.some((m: any) => Array.isArray(m.content) && m.content.some((c: any) => c.type === "image"));
     
-    const result = await generateText({
-      model: groq(hasImage ? 'llama-3.2-11b-vision-preview' : 'llama-3.1-8b-instant'),
-      messages: aiMessages
-    });
-    
-    let aiText = result.text;
+    let aiText = "";
+    try {
+      const result = await generateText({
+        model: groq(hasImage ? 'llama-3.2-11b-vision-preview' : 'llama-3.1-8b-instant'),
+        messages: aiMessages
+      });
+      aiText = result.text;
+    } catch (apiError) {
+      console.error("Groq API Error:", apiError);
+      // If the image is too large, give a friendly error instead of crashing
+      if (hasImage) {
+        aiText = "I couldn't process that image. The file might be too large (max 4MB) or the Vision model is currently busy. Please try a smaller image or describe it to me in text!";
+      } else {
+        aiText = "I'm having trouble connecting to my AI brain right now. Please try again in a moment.";
+      }
+    }
 
     const lowerAiText = aiText.toLowerCase();
     
