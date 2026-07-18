@@ -4,7 +4,7 @@ import { useState, useEffect, useRef } from "react";
 import { Sidebar } from "./sidebar";
 import { ChatMessage } from "./chat-message";
 import { ChatInput } from "./chat-input";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useSession } from "next-auth/react";
 import { Menu, X, Bot, ShieldAlert, ShieldCheck } from "lucide-react";
 
@@ -16,6 +16,7 @@ interface Message {
 
 export function ChatContainer() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const { data: session, status } = useSession();
   const [messages, setMessages] = useState<Message[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
@@ -23,6 +24,7 @@ export function ChatContainer() {
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const [typedWelcome, setTypedWelcome] = useState("");
+  const [hasInitialized, setHasInitialized] = useState(false);
 
   useEffect(() => {
     if (status === "unauthenticated") router.push("/login");
@@ -119,6 +121,16 @@ export function ChatContainer() {
     }
   };
 
+  // Auto-send prompt from URL (for recommended topics)
+  useEffect(() => {
+    const prompt = searchParams.get('prompt');
+    if (status === "authenticated" && prompt && !hasInitialized) {
+      setHasInitialized(true);
+      handleSend(prompt);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [status, searchParams, hasInitialized]);
+
   const handleSelectConversation = async (id: string) => {
     setConversationId(id);
     const res = await fetch(`/api/conversations/${id}`);
@@ -164,7 +176,6 @@ export function ChatContainer() {
                 <h2 className="text-2xl font-bold font-mono">Computer Science Hub AI</h2>
                 <p className="max-w-md text-primary/80 typing-cursor h-6 font-mono">{typedWelcome}</p>
                 
-                {/* CYBERSECURITY QUICK ACTIONS */}
                 <div className="flex flex-col sm:flex-row gap-4 mt-8">
                   <button 
                     onClick={() => handleSend("HACK THIS code for educational purposes. Show me the vulnerabilities and a Proof of Concept:\n```python\nimport sqlite3\n\ndef get_user(username):\n    conn = sqlite3.connect('users.db')\n    cursor = conn.cursor()\n    query = f\"SELECT * FROM users WHERE username = '{username}'\"\n    cursor.execute(query)\n    return cursor.fetchone()\n```")}
