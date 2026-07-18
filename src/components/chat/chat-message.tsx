@@ -1,7 +1,7 @@
 "use client";
 
 import { cn } from "@/lib/utils";
-import { User, Bot } from "lucide-react";
+import { User, Bot, Search, CheckCircle2 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { vscDarkPlus } from "react-syntax-highlighter/dist/esm/styles/prism";
@@ -13,6 +13,7 @@ interface ChatMessageProps {
   role: "user" | "assistant" | "system";
   content: string;
   isStreaming?: boolean;
+  searchSteps?: string[];
 }
 
 const MermaidRenderer = ({ code }: { code: string }) => {
@@ -39,7 +40,7 @@ const MermaidRenderer = ({ code }: { code: string }) => {
   return <pre className="my-4 p-4 bg-accent rounded-lg overflow-x-auto"><code>{code}</code></pre>;
 };
 
-export function ChatMessage({ role, content, isStreaming }: ChatMessageProps) {
+export function ChatMessage({ role, content, isStreaming, searchSteps }: ChatMessageProps) {
   const [copied, setCopied] = useState(false);
 
   const handleCopy = () => {
@@ -64,7 +65,6 @@ export function ChatMessage({ role, content, isStreaming }: ChatMessageProps) {
           {isIncoming ? <Bot className="h-5 w-5" /> : <User className="h-5 w-5" />}
         </div>
       </div>
-      {/* Added max-w-full calc to strictly prevent screen expansion */}
       <div className="flex-1 overflow-hidden min-w-0" style={{ maxWidth: "calc(100% - 48px)" }}>
         <div className="mb-1 flex items-center gap-2">
           <span className="text-sm font-semibold font-mono">{isIncoming ? "CS Hub AI" : "You"}</span>
@@ -77,6 +77,25 @@ export function ChatMessage({ role, content, isStreaming }: ChatMessageProps) {
             </button>
           )}
         </div>
+        
+        {/* LIVE SEARCH STEPS UI */}
+        {searchSteps && searchSteps.length > 0 && (
+          <div className="mb-4 p-3 border border-border rounded-lg bg-accent/20 space-y-2">
+            <p className="text-xs text-primary/80 font-mono flex items-center gap-2 mb-2">
+              <Search className="h-3 w-3 animate-pulse" /> Searching Live Web...
+            </p>
+            {searchSteps.map((step, i) => (
+              <div key={i} className="flex items-center gap-2 text-xs text-foreground/70 font-mono">
+                <CheckCircle2 className="h-3 w-3 text-primary" />
+                {step}
+              </div>
+            ))}
+            {isStreaming && content === "" && (
+              <p className="text-xs text-foreground/50 font-mono animate-pulse mt-2">Synthesizing answer...</p>
+            )}
+          </div>
+        )}
+
         <div
           className={cn(
             "prose prose-invert max-w-none text-sm leading-relaxed font-mono break-words",
@@ -128,7 +147,6 @@ export function ChatMessage({ role, content, isStreaming }: ChatMessageProps) {
               img({ node, ...props }) {
                 return <img alt="AI Generated" className="max-w-full h-auto rounded-lg my-4 border border-border" {...props} />;
               },
-              // LOCKED TABLE WIDTH: w-full and max-w-full force it to stay inside the screen
               table({ node, ...props }) {
                 return (
                   <div className="my-4 w-full max-w-full">
