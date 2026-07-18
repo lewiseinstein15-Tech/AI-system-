@@ -18,31 +18,13 @@ export default function DashboardPage() {
     const fetchDashboardData = async () => {
       if (session) {
         try {
-          const [notesRes, chatsRes, assignRes, flashRes] = await Promise.all([
-            fetch("/api/notes"),
-            fetch("/api/conversations"),
-            fetch("/api/assignments"),
-            fetch("/api/flashcards")
-          ]);
-
-          const notesData = await notesRes.json();
-          const chatsData = await chatsRes.json();
-          const assignData = await assignRes.json();
-          const flashData = await flashRes.json();
-
-          setStats({
-            notes: notesData.length || 0,
-            chats: chatsData.length || 0,
-            assignments: assignData.length || 0,
-            flashcards: flashData.length || 0
-          });
-
-          const activity = [
-            ...notesData.map((n: any) => ({ type: "Note", title: n.title, date: n.updatedAt })),
-            ...assignData.map((a: any) => ({ type: "Assignment", title: a.title, date: a.dueDate }))
-          ].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()).slice(0, 3);
-
-          setRecentActivity(activity);
+          // ONLY 1 NETWORK REQUEST NOW!
+          const res = await fetch("/api/dashboard");
+          if (res.ok) {
+            const data = await res.json();
+            setStats(data.stats);
+            setRecentActivity(data.recentActivity);
+          }
         } catch (error) {
           console.error("Failed to fetch dashboard data", error);
         } finally {
