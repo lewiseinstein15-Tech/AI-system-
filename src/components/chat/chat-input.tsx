@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
-import { Send, Paperclip, X } from "lucide-react";
+import { Send, Paperclip, X, Mic, Square } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 interface ChatInputProps {
@@ -14,8 +14,10 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
   const [fileName, setFileName] = useState("");
   const [fileContent, setFileContent] = useState("");
   const [fileType, setFileType] = useState<"text" | "image">("text");
+  const [isListening, setIsListening] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const recognitionRef = useRef<any>(null);
 
   useEffect(() => {
     if (textareaRef.current) {
@@ -24,6 +26,48 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
     }
   }, [input]);
 
+  // Setup Voice Recognition
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+      if (SpeechRecognition) {
+        const recognition = new SpeechRecognition();
+        recognition.continuous = false;
+        recognition.interimResults = false;
+        recognition.lang = "en-US";
+
+        recognition.onresult = (event: any) => {
+          const transcript = event.results[0][0].transcript;
+          setInput(prev => prev + (prev ? " " : "") + transcript);
+        };
+        
+        recognition.onerror = () => setIsListening(false);
+        recognition.onend = () => setIsListening(false);
+        
+        recognitionRef.current = recognition;
+      }
+    }
+  }, []);
+
+  const handleMicClick = () => {
+    if (!recognitionRef.current) {
+      alert("Voice input is not supported on this browser. Try using Chrome or Safari.");
+      return;
+    }
+
+    if (isListening) {
+      recognitionRef.current.stop();
+      setIsListening(false);
+    } else {
+      try {
+        recognitionRef.current.start();
+        setIsListening(true);
+      } catch (e) {
+        console.error("Mic error:", e);
+      }
+    }
+  };
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if ((!input.trim() && !fileContent) || disabled) return;
@@ -31,7 +75,6 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
     let finalMessage = input;
     if (fileContent) {
       if (fileType === "image") {
-        // Display the image in the chat using markdown syntax
         finalMessage = `${input}\n\n[Attached Image: ${fileName}]\n![Image](${fileContent})`.trim();
       } else {
         finalMessage = `${input}\n\n[Attached File: ${fileName}]\n${fileContent}`.trim();
@@ -49,7 +92,6 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    // 50MB limit (50,000,000 bytes)
     if (file.size > 50000000) {
       alert("File is too large. Please upload a file smaller than 50MB.");
       return;
@@ -58,8 +100,6 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
     setFileName(file.name);
 
     const reader = new FileReader();
-    
-    // If it's an image, read it as a Data URL so it can be displayed
     if (file.type.startsWith("image/")) {
       setFileType("image");
       reader.onload = (event) => {
@@ -68,7 +108,6 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
       };
       reader.readAsDataURL(file);
     } else {
-      // Otherwise, read it as text (for .py, .js, .txt, etc.)
       setFileType("text");
       reader.onload = (event) => {
         const text = event.target?.result as string;
@@ -117,11 +156,22 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
               ref={textareaRef}
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              placeholder={fileName ? "Type a message about your file..." : "Ask anything about Computer Science..."}
+              placeholder={isListening ? "Listening..." : "Ask anything about Computer Science..."}
               rows={1}
               className="flex-1 resize-none bg-transparent py-3 text-sm font-mono focus:outline-none max-h-40"
               disabled={disabled}
             />
+            {/* Voice Input Button */}
+            <button 
+              type="button" 
+              onClick={handleMicClick} 
+              className={cn(
+                "p-3 transition-colors",
+                isListening ? "text-red-500 animate-pulse" : "text-foreground/40 hover:text-primary"
+              )}
+            >
+              {isListening ? <Square className="h-5 w-5" /> : <Mic className="h-5 w-5" />}
+            </button>
           </div>
         </div>
         <button
