@@ -227,23 +227,9 @@ export async function POST(req: Request) {
       ...recentMessages.map((m: any) => {
         let safeContent = m.content;
         
-        // VISION: If the message contains an image, format it for the Vision model
+        // VISION REMOVED: Replace images with text placeholder to prevent API crashes
         if (safeContent.includes("data:image")) {
-          // Extract the full data URL string (e.g., "data:image/jpeg;base64,...")
-          const base64Match = safeContent.match(/data:image\/[^;]+;base64,[^"\\)]+/g);
-          if (base64Match && base64Match.length > 0) {
-            const imageUrl = base64Match[0]; 
-            const textContent = safeContent.replace(/\[Attached Image:.*?\]/, "").replace(imageUrl, "").trim();
-            
-            // Use OpenAI standard format which Groq accepts directly via fetch
-            return {
-              role: m.role === "assistant" ? "assistant" : "user",
-              content: [
-                { type: "text", text: textContent || "What is in this image?" },
-                { type: "image_url", image_url: { url: imageUrl } }
-              ]
-            };
-          }
+          safeContent = "[User attached an image. Please note that image analysis is currently disabled. Ask the user to describe the image instead.]";
         }
         
         if (safeContent.length > 2000) {
@@ -253,51 +239,13 @@ export async function POST(req: Request) {
       })
     ];
 
-    // Check if an image is present
-    const hasImage = aiMessages.some((m: any) => Array.isArray(m.content) && m.content.some((c: any) => c.type === "image_url"));
+    // Use Groq for normal fast text chat
+    const result = await generateText({
+      model: groq('llama-3.1-8b-instant'),
+      messages: aiMessages
+    });
     
-    let aiText = "";
-    try {
-      if (hasImage) {
-        // DIRECT FETCH TO GROQ API FOR VISION (Bypasses AI SDK Buffer issues)
-        const groqRes = await fetchWithTimeout("https://api.groq.com/openai/v1/chat/completions", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Authorization": `Bearer ${process.env.GROQ_API_KEY}`
-          },
-          body: JSON.stringify({
-            model: "llama-3.2-11b-vision-preview",
-            messages: aiMessages,
-            max_tokens: 1000
-          })
-        }, 30000); // 30 second timeout for vision
-
-        if (!groqRes.ok) {
-          const errText = await groqRes.text();
-          console.error("Groq Vision Direct API Error:", errText);
-          throw new Error(errText);
-        }
-
-        const groqData = await groqRes.json();
-        aiText = groqData.choices[0].message.content;
-
-      } else {
-        // Use AI SDK for normal text chat
-        const result = await generateText({
-          model: groq('llama-3.1-8b-instant'),
-          messages: aiMessages
-        });
-        aiText = result.text;
-      }
-    } catch (apiError) {
-      console.error("AI API Error:", apiError);
-      if (hasImage) {
-        aiText = "I couldn't process that image. The Vision model might be busy or the image format isn't supported. Please try again or describe it in text.";
-      } else {
-        aiText = "I'm having trouble connecting to my AI brain right now. Please try again in a moment.";
-      }
-    }
+    let aiText = result.text;
 
     const lowerAiText = aiText.toLowerCase();
     
