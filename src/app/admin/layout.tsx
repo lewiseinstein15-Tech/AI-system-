@@ -57,7 +57,7 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
         </div>
       </aside>
 
-      <main className="flex-1 p-8 pt-20 md:pt-8 overflow-y-auto" onClick={() => menuOpen && setMenuOpen(false)}>
+      <main className="flex-1 p-8 pt-20 md:pt-8 overflow-y-auto animate-page-fade" onClick={() => menuOpen && setMenuOpen(false)}>
         {children}
       </main>
     </div>
