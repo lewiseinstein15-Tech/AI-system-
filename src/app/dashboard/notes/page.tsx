@@ -3,7 +3,7 @@
 import { useState, useEffect } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { BookOpen, Plus, Trash2 } from "lucide-react";
+import { BookOpen, Plus, Trash2, X } from "lucide-react";
 
 interface Note {
   id: string;
@@ -16,6 +16,7 @@ export default function NotesPage() {
   const [notes, setNotes] = useState<Note[]>([]);
   const [title, setTitle] = useState("");
   const [content, setContent] = useState("");
+  const [selectedNote, setSelectedNote] = useState<Note | null>(null);
 
   useEffect(() => {
     fetchNotes();
@@ -82,10 +83,14 @@ export default function NotesPage() {
         ) : (
           <div className="grid gap-4 md:grid-cols-2">
             {notes.map((note) => (
-              <div key={note.id} className="card group relative">
+              <div 
+                key={note.id} 
+                className="card group relative cursor-pointer hover:border-primary transition-all"
+                onClick={() => setSelectedNote(note)}
+              >
                 <button
-                  onClick={() => handleDelete(note.id)}
-                  className="absolute right-4 top-4 text-foreground/30 hover:text-red-500 transition-colors"
+                  onClick={(e) => { e.stopPropagation(); handleDelete(note.id); }}
+                  className="absolute right-4 top-4 text-foreground/30 hover:text-red-500 transition-colors z-10"
                 >
                   <Trash2 className="h-4 w-4" />
                 </button>
@@ -104,6 +109,29 @@ export default function NotesPage() {
           </div>
         )}
       </div>
+
+      {/* Note Viewer Modal */}
+      {selectedNote && (
+        <div 
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm"
+          onClick={() => setSelectedNote(null)}
+        >
+          <div 
+            className="bg-accent border border-border rounded-lg w-full max-w-lg max-h-[80vh] flex flex-col overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between p-4 border-b border-border">
+              <h3 className="text-xl font-bold text-primary truncate">{selectedNote.title}</h3>
+              <button onClick={() => setSelectedNote(null)} className="text-foreground/60 hover:text-foreground">
+                <X className="h-6 w-6" />
+              </button>
+            </div>
+            <div className="p-6 overflow-y-auto whitespace-pre-wrap break-words text-sm">
+              {selectedNote.content}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
