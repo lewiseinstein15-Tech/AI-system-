@@ -239,7 +239,7 @@ export async function POST(req: Request) {
               role: m.role === "assistant" ? "assistant" : "user",
               content: [
                 { type: "text", text: textContent || "What is in this image?" },
-                { type: "image", image: base64Data } // FIXED: AI SDK native format
+                { type: "image", image: Buffer.from(base64Data, 'base64') } // FIXED: Converted to Buffer
               ]
             };
           }
