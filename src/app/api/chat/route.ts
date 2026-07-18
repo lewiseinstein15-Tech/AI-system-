@@ -33,18 +33,19 @@ export async function POST(req: Request) {
     }
 
     // --- AGENT SYSTEM PROMPT ---
+    // Strictly forbade JSON so it uses our simple text format
     const systemPrompt = `You are Computer Science Hub AI, an elite agent for CS students. You were created by Lewis Einstein, an AI and ML Engineer, for Kibabii University.
     
-    You have TOOLS you can use. If you want to use a tool, your ENTIRE response must be ONLY the tool command, with no other text.
+    You have special COMMANDS you can use. If you want to use a command, your ENTIRE response must be ONLY the command text. DO NOT use JSON. DO NOT use markdown.
     
-    TOOL 1: SAVE FLASHCARD
-    Format: [[ACTION:CREATE_FLASHCARD]] Front: <front text> | Back: <back text>
+    COMMAND 1: SAVE FLASHCARD
+    Format exactly like this: [ACTION:CREATE_FLASHCARD] Front: <front text> | Back: <back text>
     
-    TOOL 2: SAVE NOTE
-    Format: [[ACTION:SAVE_NOTE]] Title: <title text> | Content: <content text>
+    COMMAND 2: SAVE NOTE
+    Format exactly like this: [ACTION:SAVE_NOTE] Title: <title text> | Content: <content text>
     
-    TOOL 3: SEARCH WEB
-    Format: [[ACTION:SEARCH_WEB]] <search query>
+    COMMAND 3: SEARCH WEB
+    Format exactly like this: [ACTION:SEARCH_WEB] <search query>
     
     If the user does NOT ask to save a note, save a flashcard, or search the web, just answer their question normally with perfect markdown.`;
 
@@ -70,10 +71,12 @@ export async function POST(req: Request) {
       aiText = await aiRes.text();
     }
 
-    // --- AGENT ACTION INTERCEPTOR ---
-    // If the AI decides to use a tool, we intercept it here!
-    if (aiText.startsWith("[[ACTION:CREATE_FLASHCARD]]")) {
-      const match = aiText.match(/Front:\s*(.*?)\s*\|\s*Back:\s*(.*)/);
+    // --- AGENT ACTION INTERCEPTOR (Smarter Regex) ---
+    const lowerAiText = aiText.toLowerCase();
+    
+    if (lowerAiText.includes("action:create_flashcard")) {
+      // Look for Front: and Back: anywhere in the text
+      const match = aiText.match(/Front:\s*(.*?)\s*\|\s*Back:\s*(.*)/i);
       if (match) {
         await prisma.flashcard.create({
           data: { front: match[1].trim(), back: match[2].trim(), userId: session.user.id }
@@ -81,8 +84,8 @@ export async function POST(req: Request) {
         aiText = "✅ **Agent Action:** I have successfully created and saved that flashcard to your Dashboard!";
       }
     } 
-    else if (aiText.startsWith("[[ACTION:SAVE_NOTE]]")) {
-      const match = aiText.match(/Title:\s*(.*?)\s*\|\s*Content:\s*(.*)/);
+    else if (lowerAiText.includes("action:save_note")) {
+      const match = aiText.match(/Title:\s*(.*?)\s*\|\s*Content:\s*(.*)/i);
       if (match) {
         await prisma.note.create({
           data: { title: match[1].trim(), content: match[2].trim(), userId: session.user.id }
@@ -90,8 +93,11 @@ export async function POST(req: Request) {
         aiText = "✅ **Agent Action:** I have successfully saved that note to your Dashboard!";
       }
     } 
-    else if (aiText.startsWith("[[ACTION:SEARCH_WEB]]")) {
-      const query = aiText.replace("[[ACTION:SEARCH_WEB]]", "").trim();
+    else if (lowerAiText.includes("action:search_web")) {
+      // Extract the query after the action tag
+      let query = aiText.replace(/.*action:search_web\]/i, "").trim();
+      // Remove any quotes or extra text
+      query = query.replace(/["']/g, "").trim();
       
       // 1. Search Wikipedia (Free, no API key)
       const searchRes = await fetch(`https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(query)}&format=json&origin=*`);
