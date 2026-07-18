@@ -2,13 +2,33 @@ import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 
+// Helper to truncate text so we don't crash the AI brain
+function truncate(str: string | null, max: number) {
+  if (!str) return null;
+  return str.length > max ? str.substring(0, max) + "..." : str;
+}
+
+// Helper to fetch with a timeout so slow websites don't hold up the AI
+async function fetchWithTimeout(url: string, options: any = {}, ms: number = 5000) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), ms);
+  try {
+    const res = await fetch(url, { ...options, signal: controller.signal });
+    clearTimeout(timeout);
+    return res;
+  } catch (e) {
+    clearTimeout(timeout);
+    throw e;
+  }
+}
+
 // --- MEGA SEARCH AGENT HELPERS ---
 async function searchWiki(query: string) {
-  const searchRes = await fetch(`https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(query)}&format=json&origin=*`);
+  const searchRes = await fetchWithTimeout(`https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(query)}&format=json&origin=*`);
   const searchData = await searchRes.json();
   if (searchData.query?.search?.length > 0) {
     const title = searchData.query.search[0].title;
-    const sumRes = await fetch(`https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(title)}`);
+    const sumRes = await fetchWithTimeout(`https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(title)}`);
     const sumData = await sumRes.json();
     if (sumData.extract) return `Wikipedia: ${sumData.extract}`;
   }
@@ -16,7 +36,7 @@ async function searchWiki(query: string) {
 }
 
 async function searchDdg(query: string) {
-  const res = await fetch(`https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1&skip_disambig=1`);
+  const res = await fetchWithTimeout(`https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1&skip_disambig=1`);
   const data = await res.json();
   if (data.AbstractText) return `DuckDuckGo: ${data.AbstractText}`;
   if (data.RelatedTopics?.[0]?.Text) return `DuckDuckGo: ${data.RelatedTopics[0].Text}`;
@@ -24,7 +44,7 @@ async function searchDdg(query: string) {
 }
 
 async function searchHn(query: string) {
-  const res = await fetch(`https://hn.algolia.com/api/v1/search?query=${encodeURIComponent(query)}&tags=story&hitsPerPage=2`);
+  const res = await fetchWithTimeout(`https://hn.algolia.com/api/v1/search?query=${encodeURIComponent(query)}&tags=story&hitsPerPage=2`);
   const data = await res.json();
   if (data.hits?.length > 0) {
     const text = data.hits.map((h: any) => `Title: ${h.title}`).join(' | ');
@@ -34,7 +54,7 @@ async function searchHn(query: string) {
 }
 
 async function searchSo(query: string) {
-  const res = await fetch(`https://api.stackexchange.com/2.3/search/advanced?order=desc&sort=relevance&q=${encodeURIComponent(query)}&site=stackoverflow&pagesize=2`);
+  const res = await fetchWithTimeout(`https://api.stackexchange.com/2.3/search/advanced?order=desc&sort=relevance&q=${encodeURIComponent(query)}&site=stackoverflow&pagesize=2`);
   const data = await res.json();
   if (data.items?.length > 0) {
     const text = data.items.map((i: any) => `Q: ${i.title}`).join(' | ');
@@ -44,17 +64,17 @@ async function searchSo(query: string) {
 }
 
 async function searchGh(query: string) {
-  const res = await fetch(`https://api.github.com/search/repositories?q=${encodeURIComponent(query)}&sort=stars&order=desc&per_page=2`);
+  const res = await fetchWithTimeout(`https://api.github.com/search/repositories?q=${encodeURIComponent(query)}&sort=stars&order=desc&per_page=2`);
   const data = await res.json();
   if (data.items?.length > 0) {
-    const text = data.items.map((i: any) => `Repo: ${i.full_name} - ${i.description}`).join(' | ');
+    const text = data.items.map((i: any) => `Repo: ${i.full_name}`).join(' | ');
     return `GitHub: ${text}`;
   }
   return null;
 }
 
 async function searchArxiv(query: string) {
-  const res = await fetch(`https://export.arxiv.org/api/query?search_query=all:${encodeURIComponent(query)}&max_results=2`);
+  const res = await fetchWithTimeout(`https://export.arxiv.org/api/query?search_query=all:${encodeURIComponent(query)}&max_results=2`);
   const xmlText = await res.text();
   const titles = [...xmlText.matchAll(/<title>(.*?)<\/title>/g)].map(m => m[1]).filter(t => t !== "arXiv Query Result");
   if (titles.length > 0) return `arXiv Papers: ${titles.join(' | ')}`;
@@ -80,7 +100,7 @@ export async function POST(req: Request) {
           title: userPrompt.substring(0, 30) + "...",
         },
       });
-      currentConvId = newConversation.id;
+      currentConvId = newConversation.id();
       
       await prisma.message.create({
         data: {
@@ -91,14 +111,114 @@ export async function POST(req: Request) {
       });
     }
 
+    const lowerUserPrompt = userPrompt.toLowerCase();
+    
+    // --- INSTANT SEARCH TRIGGER ---
+    // If user says "search for", "search the web", or "look up", skip AI and search instantly!
+    const isSearchIntent = lowerUserPrompt.startsWith("search for") || lowerUserPrompt.includes("search the web") || lowerUserPrompt.startsWith("look up") || lowerUserPrompt.startsWith("search ");
+    
+    if (isSearchIntent) {
+      let query = userPrompt.replace(/(search for|search the web for|look up|search)/i, "").trim();
+      query = query.replace(/["']/g, "").trim();
+      
+      const encoder = new TextEncoder();
+      const searchStream = new ReadableStream({
+        async start(controller) {
+          const sendStep = (step: string) => {
+            const token = JSON.stringify({ searchStep: step });
+            controller.enqueue(encoder.encode(`data: ${token}\n\n`));
+          };
+          
+          sendStep("Wikipedia");
+          sendStep("DuckDuckGo");
+          sendStep("Hacker News");
+          sendStep("StackOverflow");
+          sendStep("GitHub");
+          sendStep("arXiv");
+          
+          // Fetch all 6 sources with a 5-second timeout. If a source is slow, it gets skipped.
+          const [wiki, ddg, hn, so, gh, arxiv] = await Promise.all([
+            searchWiki(query).catch(() => null),
+            searchDdg(query).catch(() => null),
+            searchHn(query).catch(() => null),
+            searchSo(query).catch(() => null),
+            searchGh(query).catch(() => null),
+            searchArxiv(query).catch(() => null)
+          ]);
+
+          let searchContext = "";
+          if (wiki) searchContext += `${truncate(wiki, 300)}\n\n`;
+          if (ddg) searchContext += `${truncate(ddg, 300)}\n\n`;
+          if (hn) searchContext += `${truncate(hn, 300)}\n\n`;
+          if (so) searchContext += `${truncate(so, 300)}\n\n`;
+          if (gh) searchContext += `${truncate(gh, 300)}\n\n`;
+          if (arxiv) searchContext += `${truncate(arxiv, 300)}\n\n`;
+
+          let aiText = "";
+          if (searchContext) {
+            const synthesizeMessages = [
+              { role: "system", content: `You just searched 6 live internet sources for "${query}". Here are the raw search results:\n\n${searchContext}\n\nPlease read these results and give the user a smart, well-formatted summary answering their query. Mention which sources you found the information from.` },
+              { role: "user", content: query }
+            ];
+
+            try {
+              const synthesizeRes = await fetch("https://text.pollinations.ai/", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ messages: synthesizeMessages, model: "openai", private: true })
+              });
+              
+              if (synthesizeRes.ok) {
+                aiText = await synthesizeRes.text();
+              } else {
+                const fallbackSynthRes = await fetch("https://text.pollinations.ai/", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ messages: synthesizeMessages, model: "mistral", private: true })
+                });
+                if (fallbackSynthRes.ok) aiText = await fallbackSynthRes.text();
+                else aiText = `🔍 I searched the web and found this:\n\n${searchContext}`;
+              }
+            } catch (e) {
+              aiText = `🔍 I searched the web and found this:\n\n${searchContext}`;
+            }
+          } else {
+            aiText = `I searched Wikipedia, DuckDuckGo, Hacker News, StackOverflow, GitHub, and arXiv for "${query}", but couldn't find a direct answer.`;
+          }
+
+          // Stream text instantly (0ms delay)
+          const words = aiText.split(' ');
+          for (const word of words) {
+            const token = JSON.stringify({ choices: [{ delta: { content: word + ' ' } }] });
+            controller.enqueue(encoder.encode(`data: ${token}\n\n`));
+          }
+          
+          controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+          controller.close();
+
+          await prisma.message.create({
+            data: { conversationId: currentConvId, role: "assistant", content: aiText }
+          });
+          await prisma.conversation.update({
+            where: { id: currentConvId },
+            data: { updatedAt: new Date() }
+          });
+        }
+      });
+
+      return new Response(searchStream, {
+        headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' }
+      });
+    }
+
+    // --- NORMAL AI CHAT & AGENT TOOLS ---
     const systemPrompt = `You are CS Hub AI, an elite assistant created by Lewis Einstein (AI/ML Engineer) for Kibabii University. 
     If asked who built you, say "I was built by Lewis Einstein."
     You have COMMANDS. If you use one, output ONLY the command (NO JSON, NO markdown):
     1. [ACTION:CREATE_FLASHCARD] Front: <text> | Back: <text>
     2. [ACTION:SAVE_NOTE] Title: <text> | Content: <text>
     3. [ACTION:CREATE_ASSIGNMENT] Title: <text> | Due: <YYYY-MM-DDTHH:MM:SS>
-    4. [ACTION:SEARCH_WEB] <query>
-    5. [ACTION:RUN_CODE] <language> \n <code>
+    4. [ACTION:RUN_CODE] <language> \n <code>
     If no command is needed, answer normally.`;
 
     const aiMessages = [
@@ -132,18 +252,14 @@ export async function POST(req: Request) {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ messages: aiMessages, model: "mistral", private: true })
         });
-        if (fallbackRes.ok) {
-          aiText = await fallbackRes.text();
-        } else {
-          aiText = "I'm having trouble connecting to my AI brain right now. Please try again in a moment.";
-        }
+        if (fallbackRes.ok) aiText = await fallbackRes.text();
+        else aiText = "I'm having trouble connecting to my AI brain right now. Please try again in a moment.";
       } catch (err2) {
          aiText = "I'm having trouble connecting to my AI brain right now. Please try again in a moment.";
       }
     }
 
     const lowerAiText = aiText.toLowerCase();
-    const lowerUserPrompt = userPrompt.toLowerCase();
     
     // 1. Flashcard
     if (lowerAiText.includes("action:create_flashcard") || (lowerUserPrompt.includes("create") && lowerUserPrompt.includes("flashcard"))) {
@@ -176,98 +292,7 @@ export async function POST(req: Request) {
         aiText = "✅ **Agent Action:** I have successfully scheduled that assignment in your Dashboard!";
       }
     }
-    // 4. MEGA WEB SEARCH (WITH LIVE UI STEPS)
-    else if (lowerAiText.includes("action:search_web") || lowerUserPrompt.includes("search the web")) {
-      let query = aiText.replace(/.*action:search_web\]/i, "").trim();
-      if (!query || query.startsWith("i couldn't")) {
-        query = userPrompt.replace(/.*search the web for/i, "").trim();
-      }
-      query = query.replace(/["']/g, "").trim();
-      
-      const encoder = new TextEncoder();
-      const searchStream = new ReadableStream({
-        async start(controller) {
-          const sendStep = (step: string) => {
-            const token = JSON.stringify({ searchStep: step });
-            controller.enqueue(encoder.encode(`data: ${token}\n\n`));
-          };
-          
-          // 1. Send the searching steps to the UI instantly
-          sendStep("Wikipedia");
-          sendStep("DuckDuckGo");
-          sendStep("Hacker News");
-          sendStep("StackOverflow");
-          sendStep("GitHub");
-          sendStep("arXiv");
-          
-          // 2. Actually perform the searches
-          const [wiki, ddg, hn, so, gh, arxiv] = await Promise.all([
-            searchWiki(query).catch(() => null),
-            searchDdg(query).catch(() => null),
-            searchHn(query).catch(() => null),
-            searchSo(query).catch(() => null),
-            searchGh(query).catch(() => null),
-            searchArxiv(query).catch(() => null)
-          ]);
-
-          let searchContext = "";
-          if (wiki) searchContext += `${wiki}\n\n`;
-          if (ddg) searchContext += `${ddg}\n\n`;
-          if (hn) searchContext += `${hn}\n\n`;
-          if (so) searchContext += `${so}\n\n`;
-          if (gh) searchContext += `${gh}\n\n`;
-          if (arxiv) searchContext += `${arxiv}\n\n`;
-
-          if (searchContext) {
-            const synthesizeMessages = [
-              { role: "system", content: `You just searched 6 live internet sources (Wikipedia, DuckDuckGo, Hacker News, StackOverflow, GitHub, arXiv) for "${query}". Here are the raw search results:\n\n${searchContext}\n\nPlease read these results and give the user a smart, well-formatted summary answering their query. Mention which sources you found the information from.` },
-              { role: "user", content: query }
-            ];
-
-            try {
-              const synthesizeRes = await fetch("https://text.pollinations.ai/", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ messages: synthesizeMessages, model: "openai", private: true })
-              });
-              if (synthesizeRes.ok) {
-                aiText = await synthesizeRes.text();
-              } else {
-                aiText = `🔍 I searched the web and found this:\n\n${searchContext}`;
-              }
-            } catch (e) {
-              aiText = `🔍 I searched the web and found this:\n\n${searchContext}`;
-            }
-          } else {
-            aiText = `I searched Wikipedia, DuckDuckGo, Hacker News, StackOverflow, GitHub, and arXiv for "${query}", but couldn't find a direct answer.`;
-          }
-
-          // 3. Stream the final text answer
-          const words = aiText.split(' ');
-          for (const word of words) {
-            const token = JSON.stringify({ choices: [{ delta: { content: word + ' ' } }] });
-            controller.enqueue(encoder.encode(`data: ${token}\n\n`));
-            await new Promise((resolve) => setTimeout(resolve, 50));
-          }
-          
-          controller.enqueue(encoder.encode('data: [DONE]\n\n'));
-          controller.close();
-
-          await prisma.message.create({
-            data: { conversationId: currentConvId, role: "assistant", content: aiText }
-          });
-          await prisma.conversation.update({
-            where: { id: currentConvId },
-            data: { updatedAt: new Date() }
-          });
-        }
-      });
-
-      return new Response(searchStream, {
-        headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' }
-      });
-    }
-    // 5. Run Code
+    // 4. Run Code
     else if (lowerAiText.includes("action:run_code") || lowerUserPrompt.includes("run code")) {
       const match = aiText.match(/action:run_code\]\s*(\w+)\s*\n([\s\S]*)/i);
       const language = match?.[1] || "python";
@@ -292,7 +317,7 @@ export async function POST(req: Request) {
       }
     }
 
-    // --- STREAM RESPONSE TO UI ---
+    // --- STREAM RESPONSE TO UI (0ms delay for instant typing) ---
     const encoder = new TextEncoder();
     const customStream = new ReadableStream({
       async start(controller) {
@@ -300,7 +325,6 @@ export async function POST(req: Request) {
         for (const word of words) {
           const token = JSON.stringify({ choices: [{ delta: { content: word + ' ' } }] });
           controller.enqueue(encoder.encode(`data: ${token}\n\n`));
-          await new Promise((resolve) => setTimeout(resolve, 50));
         }
         controller.enqueue(encoder.encode('data: [DONE]\n\n'));
         controller.close();
