@@ -2,7 +2,8 @@ import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { groq } from '@ai-sdk/groq';
-import { generateText } from 'ai';
+import { generateText, tool } from 'ai';
+import { z } from 'zod';
 
 // Helper to truncate text so we don't crash the AI brain
 function truncate(str: string | null, max: number) {
@@ -195,7 +196,7 @@ export async function POST(req: Request) {
       });
     }
 
-    // --- AUTONOMOUS CODE INTERPRETER PIPELINE ---
+    // --- NATIVE TOOL CALLING PIPELINE ---
     const isCodingQuestion = lowerUserPrompt.includes("code") || 
                              lowerUserPrompt.includes("algorithm") || 
                              lowerUserPrompt.includes("complexity") ||
@@ -212,155 +213,76 @@ export async function POST(req: Request) {
     let aiText = "";
 
     if (isCodingQuestion) {
-      // 1. PLAN & CODE GENERATION
-      const codeGenPrompt = `You are an AI that solves problems strictly by writing Python code. 
-      First, write a brief plan as a Python comment. 
-      Then, write the Python code to solve the problem and print the final answer. 
-      Output ONLY the Python code inside a single markdown block \`\`\`python ... \`\`\`.`;
-      
-      const codeGenMessages = [
-        { role: "system", content: codeGenPrompt },
-        ...messages.slice(-4).map((m: any) => {
-          let safeContent = m.content;
-          if (safeContent.includes("data:image")) {
-            safeContent = "[User attached an image. Please note that image analysis is currently disabled. Ask the user to describe the image instead.]";
-          }
-          return { role: m.role === "assistant" ? "assistant" : "user", content: safeContent };
-        })
-      ];
+      const systemPrompt = `You are CS Hub AI, an elite assistant. You solve coding problems by writing Python code and executing it.
+      Whenever you write code, you MUST call the execute_python tool to actually run it before presenting your final answer.
+      Never describe a trace, output, or test result without first executing the code and reading the real result. 
+      If execution fails, show the real error and fix your code using the tool again.
+      After the tool returns the output, explain the result, the approach, and the time/space complexity to the user.`;
 
-      const codeResult = await generateText({
-        model: groq('llama-3.1-8b-instant'),
-        messages: codeGenMessages,
-        temperature: 0.1
+      const recentMessages = messages.slice(-4).map((m: any) => {
+        let safeContent = m.content;
+        if (safeContent.includes("data:image")) {
+          safeContent = "[User attached an image.]";
+        }
+        return { role: m.role === "assistant" ? "assistant" : "user", content: safeContent };
       });
 
-      const codeMatch = codeResult.text.match(/```python\n?([\s\S]*?)```/);
-      
-      if (codeMatch && codeMatch[1]) {
-        let pythonCode = codeMatch[1].trim();
-        let finalOutput = "";
-        let isExecSuccess = false;
+      const result = await generateText({
+        model: groq('llama-3.1-8b-instant'),
+        messages: [
+          { role: "system", content: systemPrompt },
+          ...recentMessages
+        ],
+        temperature: 0.1,
+        maxSteps: 4, // Allow up to 4 loops of tool calling (write -> run -> fix -> run)
+        tools: {
+          execute_python: tool({
+            description: 'Executes Python code and returns stdout/stderr/errors',
+            parameters: z.object({
+              code: z.string().describe('Python code to run'),
+            }),
+            execute: async ({ code }) => {
+              try {
+                const pistonRes = await fetchWithTimeout("https://emkc.org/api/v2/piston/execute", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({
+                    language: "python",
+                    version: "3.10.0",
+                    files: [{ name: "main.py", content: code }]
+                  })
+                }, 15000);
 
-        // 2. SANDBOX EXECUTE & RETRY LOOP (Max 3 attempts)
-        for (let attempt = 0; attempt < 3; attempt++) {
-          try {
-            const pistonRes = await fetchWithTimeout("https://emkc.org/api/v2/piston/execute", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                language: "python",
-                version: "3.10.0",
-                files: [{ name: "main.py", content: pythonCode }]
-              })
-            }, 15000);
-
-            if (pistonRes.ok) {
-              const pistonData = await pistonRes.json();
-              const stdout = pistonData.run.output || "";
-              const stderr = pistonData.run.stderr || "";
-              const exitCode = pistonData.run.code;
-
-              // 3. PASS / FAIL CHECK
-              // If exit code is 0 and there is output, it's a PASS
-              if (exitCode === 0 && stdout.trim() !== "") {
-                finalOutput = stdout;
-                isExecSuccess = true;
-                break; // Exit loop, proceed to explain
-              } 
-              // 4. FAIL -> FEED ERROR BACK TO GROQ
-              else {
-                const errorMsg = stderr || `Execution failed with exit code ${exitCode} and no output.`;
-                console.log(`Attempt ${attempt + 1} failed. Error: ${errorMsg}`);
-                
-                if (attempt < 2) {
-                  const fixPrompt = `You wrote Python code to solve a problem, but it failed in the sandbox with this error:\n\n${errorMsg}\n\nHere is your broken code:\n\`\`\`python\n${pythonCode}\n\`\`\`\n\nFix the error. Output ONLY the corrected Python code inside a single markdown block.`;
-                  const fixResult = await generateText({
-                    model: groq('llama-3.1-8b-instant'),
-                    messages: [{ role: "user", content: fixPrompt }],
-                    temperature: 0.1
-                  });
-                  const fixedMatch = fixResult.text.match(/```python\n?([\s\S]*?)```/);
-                  if (fixedMatch && fixedMatch[1]) {
-                    pythonCode = fixedMatch[1].trim(); // Update code for next loop
-                  } else {
-                    break; // If AI didn't output code, break loop
-                  }
+                if (pistonRes.ok) {
+                  const pistonData = await pistonRes.json();
+                  const stdout = pistonData.run.output || "";
+                  const stderr = pistonData.run.stderr || "";
+                  return { stdout, stderr };
+                } else {
+                  return { stdout: "", stderr: "Sandbox rate limited or unavailable." };
                 }
+              } catch (e) {
+                return { stdout: "", stderr: "Execution network error." };
               }
-            } else {
-              // Piston rate limiting or down. Break loop and fallback.
-              break; 
             }
-          } catch (e) {
-            break; // Network error. Break loop and fallback.
-          }
+          })
         }
+      });
+      
+      aiText = result.text; // The SDK automatically handles the loop and returns the final explanation
 
-        // 5. RETURN TO USER (Explain the result)
-        if (isExecSuccess) {
-          const explainMessages = [
-            { 
-              role: "system", 
-              content: `You are CS Hub AI. You generated Python code to solve the user's problem and ran it in a real interpreter. Here is the ACTUAL execution output:\n\n${finalOutput}\n\nExplain this result to the user. Provide the final answer clearly, explain the approach, and provide the time/space complexity. Include the final Python code you wrote in your response.` 
-            },
-            { role: "user", content: userPrompt }
-          ];
-
-          const explainResult = await generateText({
-            model: groq('llama-3.1-8b-instant'),
-            messages: explainMessages,
-            temperature: 0.3
-          });
-          
-          aiText = explainResult.text;
-        } else {
-          // Fallback if execution completely failed after 3 attempts
-          const fallbackResult = await generateText({
-            model: groq('llama-3.1-8b-instant'),
-            messages: [
-              { role: "system", content: "You are CS Hub AI. Solve the coding problem. Provide code, trace, and complexity." },
-              { role: "user", content: userPrompt }
-            ],
-            temperature: 0.2
-          });
-          aiText = fallbackResult.text;
-        }
-      } else {
-        // Fallback if AI didn't write code in the first pass
-        const fallbackResult = await generateText({
-          model: groq('llama-3.1-8b-instant'),
-          messages: [
-            { role: "system", content: "You are CS Hub AI. Answer the question." },
-            { role: "user", content: userPrompt }
-          ],
-          temperature: 0.3
-        });
-        aiText = fallbackResult.text;
-      }
     } else {
       // --- NORMAL AI CHAT (Non-Coding) ---
       const systemPrompt = `You are CS Hub AI, an elite assistant created by Lewis Einstein (AI/ML Engineer) for Kibabii University. 
       If asked who built you, say "I was built by Lewis Einstein, an AI and ML Engineer."
-      You have full memory of this conversation. You can see the entire chat history provided to you. Do not say you don't save conversations, because your memory is handled by the system.
-      
-      You have TOOLS. When a user asks you to perform an action, you MUST output ONLY the tool command. DO NOT explain the code. DO NOT add markdown formatting around the command.
-      
-      TOOL 1: SAVE FLASHCARD
-      If user says "create flashcard", output ONLY: [ACTION:CREATE_FLASHCARD] Front: <text> | Back: <text>
-      
-      TOOL 2: SAVE NOTE
-      If user says "save note", output ONLY: [ACTION:SAVE_NOTE] Title: <text> | Content: <text>
-      
-      TOOL 3: CREATE ASSIGNMENT
-      If user says "add assignment", output ONLY: [ACTION:CREATE_ASSIGNMENT] Title: <text> | Due: <YYYY-MM-DDTHH:MM:SS>
-
+      You have full memory of this conversation.
+      You have TOOLS. If you use one, output ONLY the command:
+      1. [ACTION:CREATE_FLASHCARD] Front: <text> | Back: <text>
+      2. [ACTION:SAVE_NOTE] Title: <text> | Content: <text>
+      3. [ACTION:CREATE_ASSIGNMENT] Title: <text> | Due: <YYYY-MM-DDTHH:MM:SS>
       CYBERSECURITY MODES:
-      If the user says "HACK THIS" or "Test Security", act as an Ethical Hacker (Red Team). Analyze the provided code, identify vulnerabilities (SQLi, XSS, RCE, etc.), and write a Proof of Concept (PoC) showing how a hacker could exploit it. Always add a warning: "For educational purposes only."
-      
-      If the user says "FIX SECURITY" or "Defend This", act as a Security Engineer (Blue Team). Analyze the code, patch all vulnerabilities, and output the secure, production-ready version of the code with comments explaining the fixes.
-      
-      If the user asks you to run or execute code, DO NOT use a tool. Just mentally trace the code and provide the expected output in a markdown code block.
+      "HACK THIS" = Red Team analysis with PoC.
+      "FIX SECURITY" = Blue Team patched code.
       If no tool or security mode is needed, answer normally with perfect markdown. Keep answers concise (max 800 words).`;
 
       const recentMessages = messages.slice(-10);
@@ -370,7 +292,7 @@ export async function POST(req: Request) {
         ...recentMessages.map((m: any) => {
           let safeContent = m.content;
           if (safeContent.includes("data:image")) {
-            safeContent = "[User attached an image. Please note that image analysis is currently disabled. Ask the user to describe the image instead.]";
+            safeContent = "[User attached an image.]";
           }
           if (safeContent.length > 2000) {
             safeContent = safeContent.substring(0, 2000) + "... [truncated]";
