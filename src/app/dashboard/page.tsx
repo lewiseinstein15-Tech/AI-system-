@@ -3,13 +3,14 @@
 import { useState, useEffect } from "react";
 import { useSession } from "next-auth/react";
 import { useRouter } from "next/navigation";
-import { BookOpen, Brain, FileText, Layers, Calendar } from "lucide-react";
+import { BookOpen, Brain, FileText, Layers, Calendar, Loader2 } from "lucide-react";
 
 export default function DashboardPage() {
   const { data: session, status } = useSession();
   const router = useRouter();
   const [stats, setStats] = useState({ notes: 0, chats: 0, assignments: 0, flashcards: 0 });
   const [recentActivity, setRecentActivity] = useState<any[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
     if (status === "unauthenticated") router.push("/login");
@@ -42,9 +43,10 @@ export default function DashboardPage() {
           ].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()).slice(0, 3);
 
           setRecentActivity(activity);
-
         } catch (error) {
           console.error("Failed to fetch dashboard data", error);
+        } finally {
+          setIsLoading(false); // Stop loading spinner
         }
       }
     };
@@ -53,9 +55,17 @@ export default function DashboardPage() {
   }, [session, status, router]);
 
   const handleTopicClick = (topic: string) => {
-    // Route to the chat page and pass the topic as a query parameter
     router.push(`/?prompt=${encodeURIComponent("Give me a comprehensive overview of " + topic + " with examples.")}`);
   };
+
+  if (isLoading) {
+    return (
+      <div className="min-h-screen flex flex-col items-center justify-center bg-background gap-4">
+        <Loader2 className="h-8 w-8 text-primary animate-spin" />
+        <p className="text-primary font-mono animate-pulse">Loading Dashboard...</p>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-background p-8">
