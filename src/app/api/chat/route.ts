@@ -86,7 +86,7 @@ const GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions";
 const PISTON_API_URL = "https://emkc.org/api/v2/piston/execute";
 const MAX_DEBUG_ROUNDS = 5;
 
-const SYSTEM_PROMPT = `You are CS Hub AI, an elite coding assistant.
+const SYSTEM_PROMPT = `You are the CS Hub AI, an expert coding assistant.
 MANDATORY DEBUGGING WORKFLOW:
 1. Write your first attempt at the solution.
 2. You MUST call the execute_code tool to actually run it.
@@ -95,7 +95,12 @@ MANDATORY DEBUGGING WORKFLOW:
 MANDATORY VERIFICATION:
 5. After passing execute_code, you MUST call stress_test_code for algorithmic problems. Write a simple brute-force solution and a random input generator.
 6. If stress_test_code reports mismatches, fix your algorithm and test again until 0 mismatches.
-7. Only after both tools pass should you give your final answer to the user. State what you verified.`;
+7. Only after both tools pass should you give your final answer to the user. State what you verified.
+
+ABSOLUTE RULE ON VERIFICATION CLAIMS:
+- You must NEVER write prose claiming code was executed, tested, or verified unless you actually made a real execute_code or stress_test_code TOOL CALL in this conversation and are looking at its real returned result right now.
+- Writing out a Python code block that CALLS stress_test_code as if it were a function in your own code is NOT the same as actually invoking the stress_test_code TOOL. That code will never run — you must invoke the tool directly.
+- If you have not actually received a tool result confirming success, say plainly: "I have not yet verified this."`;
 
 const TOOLS = [
   {
@@ -200,7 +205,7 @@ async function callGroq(messages: any[]) {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${process.env.GROQ_API_KEY}` },
     body: JSON.stringify({
-      model: "llama-3.1-8b-instant", // Fixed hallucinated model name
+      model: "llama-3.1-8b-instant", 
       messages,
       tools: TOOLS,
       tool_choice: "auto",
@@ -210,6 +215,44 @@ async function callGroq(messages: any[]) {
   });
   if (!res.ok) throw new Error(`Groq API error (${res.status})`);
   return res.json();
+}
+
+function safeParse(s: string) {
+  try { return JSON.parse(s); } catch { return { raw: s }; }
+}
+
+// Backend-level guardrail to catch hallucinated verification claims
+const VERIFICATION_CLAIM_PATTERNS = [
+  /verified/i,
+  /passes? all( the)? tests?/i,
+  /tested against/i,
+  /ran (this|the) (code|solution)/i,
+  /confirmed (to be )?correct/i,
+  /0 mismatches/i,
+];
+
+function checkForUnverifiedClaims(finalAnswer: string, executionLog: any[]): { flagged: boolean; note?: string } {
+  const claimsVerification = VERIFICATION_CLAIM_PATTERNS.some((re) => re.test(finalAnswer));
+  if (!claimsVerification) return { flagged: false };
+
+  const ranStressTest = executionLog.some((entry) => entry.type === "stress_test_code" && entry.result && entry.result.all_passed === true);
+  const ranExecuteCode = executionLog.some((entry) => entry.type === "execute_code");
+
+  if (!ranStressTest && !ranExecuteCode) {
+    return {
+      flagged: true,
+      note: "⚠️ **System Warning:** This response claims the code was tested/verified, but no execute_code or stress_test_code tool was actually called in this session. Treat any 'verified' claim above with caution — it may be fabricated."
+    };
+  }
+
+  if (/stress test|brute force|random (cases|trials)/i.test(finalAnswer) && !ranStressTest) {
+    return {
+      flagged: true,
+      note: "⚠️ **System Warning:** This response references stress testing against a brute force / random trials, but stress_test_code was never actually called (or didn't return all_passed: true) in this session. Treat that specific claim with caution."
+    };
+  }
+
+  return { flagged: false };
 }
 
 export async function POST(req: Request) {
@@ -298,6 +341,8 @@ export async function POST(req: Request) {
       ];
 
       let debugRounds = 0;
+      const executionLog: any[] = []; // Track real tool executions
+
       while (debugRounds < MAX_DEBUG_ROUNDS) {
         const response = await callGroq(groqMessages);
         const message = response.choices?.[0]?.message;
@@ -307,9 +352,15 @@ export async function POST(req: Request) {
           for (const toolCall of message.tool_calls) {
             const args = JSON.parse(toolCall.function.arguments);
             let result = "";
-            if (toolCall.function.name === "execute_code") result = await executeCode(args.language, args.code, args.stdin || "");
-            else if (toolCall.function.name === "stress_test_code") result = await stressTestCode(args);
-            else result = JSON.stringify({ error: "Unknown tool" });
+            if (toolCall.function.name === "execute_code") {
+              result = await executeCode(args.language, args.code, args.stdin || "");
+              executionLog.push({ type: "execute_code", language: args.language, code: args.code, result: safeParse(result) });
+            } else if (toolCall.function.name === "stress_test_code") {
+              result = await stressTestCode(args);
+              executionLog.push({ type: "stress_test_code", function_name: args.function_name, num_trials: args.num_trials || 200, result: safeParse(result) });
+            } else {
+              result = JSON.stringify({ error: "Unknown tool" });
+            }
             groqMessages.push({ role: "tool", tool_call_id: toolCall.id, content: result });
           }
           debugRounds++;
@@ -318,7 +369,15 @@ export async function POST(req: Request) {
           break;
         }
       }
+      
       if (!aiText) aiText = "I tried to solve this but couldn't verify it properly. Here is my best attempt.";
+
+      // Run Claude's hallucination check!
+      const verificationCheck = checkForUnverifiedClaims(aiText, executionLog);
+      if (verificationCheck.flagged) {
+        aiText = `${aiText}\n\n${verificationCheck.note}`;
+      }
+
     } else {
       // --- NORMAL AI CHAT ---
       const systemPrompt = `You are CS Hub AI, created by Lewis Einstein. If asked who built you, say "I was built by Lewis Einstein." You have TOOLS. Output ONLY the command: 1. [ACTION:CREATE_FLASHCARD] Front: <text> | Back: <text> 2. [ACTION:SAVE_NOTE] Title: <text> | Content: <text> 3. [ACTION:CREATE_ASSIGNMENT] Title: <text> | Due: <YYYY-MM-DDTHH:MM:SS>`;
