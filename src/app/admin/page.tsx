@@ -2,7 +2,7 @@
 
 import { useSession } from "next-auth/react";
 import { useRouter } from "next/navigation";
-import { Users, Database, Settings, Shield, BookMarked } from "lucide-react";
+import { Users, Database, Settings, Shield, BookMarked, Loader2 } from "lucide-react";
 import Link from "next/link";
 import { useEffect, useState } from "react";
 
@@ -10,12 +10,12 @@ export default function AdminPage() {
   const { data: session, status } = useSession();
   const router = useRouter();
   const [totalUsers, setTotalUsers] = useState(0);
+  const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
     if (status === "unauthenticated") router.push("/login");
     if (status === "authenticated" && session?.user?.role !== "ADMIN") router.push("/unauthorized");
 
-    // Fetch REAL user count from the database
     const fetchUsers = async () => {
       try {
         const res = await fetch("/api/admin/users");
@@ -25,10 +25,21 @@ export default function AdminPage() {
         }
       } catch (error) {
         console.error("Failed to fetch users", error);
+      } finally {
+        setIsLoading(false);
       }
     };
     fetchUsers();
   }, [session, status, router]);
+
+  if (isLoading) {
+    return (
+      <div className="min-h-screen flex flex-col items-center justify-center bg-background gap-4">
+        <Loader2 className="h-8 w-8 text-primary animate-spin" />
+        <p className="text-primary font-mono animate-pulse">Loading Admin Panel...</p>
+      </div>
+    );
+  }
 
   const stats = [
     { name: "Total Users", value: totalUsers.toString(), icon: Users, href: "/admin/users" },
