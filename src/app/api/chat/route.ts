@@ -22,6 +22,36 @@ async function fetchWithTimeout(url: string, options: any = {}, ms: number = 500
   }
 }
 
+// --- BULLETPROOF AI BRAIN ---
+// Tries 4 different models one by one until one works
+async function getAiResponse(messages: any[]): Promise<string> {
+  const models = ["openai", "mistral", "llama", "zephyr"];
+  
+  for (const model of models) {
+    try {
+      console.log(`Trying AI model: ${model}...`);
+      const res = await fetchWithTimeout("https://text.pollinations.ai/", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ messages, model, private: true })
+      }, 30000); // 30 second timeout
+      
+      if (res.ok) {
+        const text = await res.text();
+        if (text && text.length > 5 && !text.includes("error")) {
+          console.log(`✅ Model ${model} succeeded!`);
+          return text;
+        }
+      }
+    } catch (e) {
+      console.log(`❌ Model ${model} failed, trying next...`);
+    }
+  }
+  
+  // If all models fail, return a smart fallback
+  return "I'm having trouble connecting to my AI brain right now. All 4 models are busy. Please try again in a moment, or try rephrasing your question.";
+}
+
 // --- MEGA SEARCH AGENT HELPERS ---
 async function searchWiki(query: string) {
   const searchRes = await fetchWithTimeout(`https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(query)}&format=json&origin=*`);
@@ -155,33 +185,13 @@ export async function POST(req: Request) {
           let aiText = "";
           if (searchContext) {
             const synthesizeMessages = [
-              { role: "system", content: `You just searched 6 live internet sources for "${query}". Here are the raw search results:\n\n${searchContext}\n\nPlease read these results and give the user a smart, well-formatted summary answering their query. Mention which sources you found the information from.` },
+              { role: "system", content: `You just searched 6 live internet sources for "${query}". Here are the raw search results:\n\n${searchContext}\n\nPlease read these results and give the user a smart, well-formatted summary answering their query. Mention which sources you found the information from. Keep your answer concise (max 500 words).` },
               { role: "user", content: query }
             ];
 
-            try {
-              const synthesizeRes = await fetch("https://text.pollinations.ai/", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ messages: synthesizeMessages, model: "openai", private: true })
-              });
-              
-              if (synthesizeRes.ok) {
-                aiText = await synthesizeRes.text();
-              } else {
-                const fallbackSynthRes = await fetch("https://text.pollinations.ai/", {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({ messages: synthesizeMessages, model: "mistral", private: true })
-                });
-                if (fallbackSynthRes.ok) aiText = await fallbackSynthRes.text();
-                else aiText = `🔍 I searched the web and found this:\n\n${searchContext}`;
-              }
-            } catch (e) {
-              aiText = `🔍 I searched the web and found this:\n\n${searchContext}`;
-            }
+            aiText = await getAiResponse(synthesizeMessages);
           } else {
-            aiText = `I searched Wikipedia, DuckDuckGo, Hacker News, StackOverflow, GitHub, and arXiv for "${query}", but couldn't find a direct answer.`;
+            aiText = `I searched Wikipedia, DuckDuckGo, Hacker News, StackOverflow, GitHub, and arXiv for "${query}", but couldn't find a direct answer. Try rephrasing your search.`;
           }
 
           const words = aiText.split(' ');
@@ -216,45 +226,28 @@ export async function POST(req: Request) {
     2. [ACTION:SAVE_NOTE] Title: <text> | Content: <text>
     3. [ACTION:CREATE_ASSIGNMENT] Title: <text> | Due: <YYYY-MM-DDTHH:MM:SS>
     4. [ACTION:RUN_CODE] <language> \n <code>
-    If no command is needed, answer normally.`;
+    If no command is needed, answer normally. Keep answers concise (max 800 words).`;
 
+    // Limit conversation history to last 6 messages to prevent token overload
+    const recentMessages = messages.slice(-6);
+    
     const aiMessages = [
       { role: "system", content: systemPrompt },
-      ...messages.map((m: any) => {
+      ...recentMessages.map((m: any) => {
         let safeContent = m.content;
         if (safeContent.includes("data:image")) {
           safeContent = safeContent.replace(/data:image\/[^;]+;base64,[^"\\)]+/g, "[User attached an image]");
+        }
+        // Truncate individual messages to prevent token overload
+        if (safeContent.length > 2000) {
+          safeContent = safeContent.substring(0, 2000) + "... [truncated]";
         }
         return { role: m.role === "assistant" ? "assistant" : "user", content: safeContent };
       })
     ];
 
-    let aiText = "";
-    try {
-      const aiRes = await fetch("https://text.pollinations.ai/", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ messages: aiMessages, model: "openai", private: true })
-      });
-      
-      if (aiRes.ok) {
-        aiText = await aiRes.text();
-      } else {
-        throw new Error("AI API returned an error");
-      }
-    } catch (err) {
-      try {
-        const fallbackRes = await fetch("https://text.pollinations.ai/", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ messages: aiMessages, model: "mistral", private: true })
-        });
-        if (fallbackRes.ok) aiText = await fallbackRes.text();
-        else aiText = "I'm having trouble connecting to my AI brain right now. Please try again in a moment.";
-      } catch (err2) {
-         aiText = "I'm having trouble connecting to my AI brain right now. Please try again in a moment.";
-      }
-    }
+    // Use the bulletproof AI brain!
+    let aiText = await getAiResponse(aiMessages);
 
     const lowerAiText = aiText.toLowerCase();
     
@@ -296,11 +289,11 @@ export async function POST(req: Request) {
       const code = match?.[2] || userPrompt.replace(/.*run this.*code/i, "").replace(/```python|```/g, "").trim();
       
       try {
-        const pistonRes = await fetch("https://emkc.org/api/v2/piston/execute", {
+        const pistonRes = await fetchWithTimeout("https://emkc.org/api/v2/piston/execute", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ language, version: "*", files: [{ content: code }] })
-        });
+        }, 15000);
 
         if (pistonRes.ok) {
           const pistonData = await pistonRes.json();
