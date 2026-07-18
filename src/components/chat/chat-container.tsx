@@ -11,6 +11,7 @@ import { Menu, X, Bot } from "lucide-react";
 interface Message {
   role: "user" | "assistant" | "system";
   content: string;
+  searchSteps?: string[];
 }
 
 export function ChatContainer() {
@@ -53,7 +54,7 @@ export function ChatContainer() {
     if (!session) return;
 
     const newUserMessage: Message = { role: "user", content: message };
-    setMessages((prev) => [...prev, newUserMessage, { role: "assistant", content: "" }]);
+    setMessages((prev) => [...prev, newUserMessage, { role: "assistant", content: "", searchSteps: [] }]);
     setIsStreaming(true);
 
     try {
@@ -83,12 +84,27 @@ export function ChatContainer() {
 
           try {
             const parsed = JSON.parse(data);
-            const token = parsed.choices?.[0]?.delta?.content || "";
-            if (token) {
+            
+            // Handle Search Steps
+            if (parsed.searchStep) {
+              setMessages((prev) => {
+                const newMessages = [...prev];
+                const lastMsg = newMessages[newMessages.length - 1];
+                lastMsg.searchSteps = [...(lastMsg.searchSteps || []), parsed.searchStep];
+                return [...newMessages];
+              });
+            } 
+            // Handle Text
+            else if (parsed.choices?.[0]?.delta?.content) {
+              const token = parsed.choices[0].delta.content;
               assistantContent += token;
               setMessages((prev) => {
                 const newMessages = [...prev];
-                newMessages[newMessages.length - 1] = { role: "assistant", content: assistantContent };
+                newMessages[newMessages.length - 1] = {
+                  role: "assistant",
+                  content: assistantContent,
+                  searchSteps: newMessages[newMessages.length - 1].searchSteps
+                };
                 return newMessages;
               });
             }
@@ -142,7 +158,6 @@ export function ChatContainer() {
           <div className="w-6"></div>
         </header>
         
-        {/* Added overflow-x-hidden here to stop the whole screen from expanding */}
         <div className="flex-1 overflow-y-auto overflow-x-hidden">
           <div className="mx-auto max-w-3xl py-6">
             {messages.length === 0 ? (
@@ -155,7 +170,7 @@ export function ChatContainer() {
               </div>
             ) : (
               messages.map((msg, i) => {
-                const isThinking = isStreaming && i === messages.length - 1 && msg.role === "assistant" && msg.content === "";
+                const isThinking = isStreaming && i === messages.length - 1 && msg.role === "assistant" && msg.content === "" && !msg.searchSteps?.length;
                 
                 if (isThinking) {
                   return (
@@ -181,6 +196,7 @@ export function ChatContainer() {
                     role={msg.role}
                     content={msg.content}
                     isStreaming={isStreaming && i === messages.length - 1 && msg.role === "assistant"}
+                    searchSteps={msg.searchSteps}
                   />
                 );
               })
