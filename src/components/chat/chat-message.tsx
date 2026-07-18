@@ -1,19 +1,17 @@
 "use client";
 
 import { cn } from "@/lib/utils";
-import { User, Bot, Search, CheckCircle2 } from "lucide-react";
+import { User, Bot, Check, Copy, Volume2, Square } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { vscDarkPlus } from "react-syntax-highlighter/dist/esm/styles/prism";
 import { useState, useEffect } from "react";
-import { Check, Copy } from "lucide-react";
 import remarkGfm from "remark-gfm";
 
 interface ChatMessageProps {
   role: "user" | "assistant" | "system";
   content: string;
   isStreaming?: boolean;
-  searchSteps?: string[];
 }
 
 const MermaidRenderer = ({ code }: { code: string }) => {
@@ -40,13 +38,39 @@ const MermaidRenderer = ({ code }: { code: string }) => {
   return <pre className="my-4 p-4 bg-accent rounded-lg overflow-x-auto"><code>{code}</code></pre>;
 };
 
-export function ChatMessage({ role, content, isStreaming, searchSteps }: ChatMessageProps) {
+export function ChatMessage({ role, content, isStreaming }: ChatMessageProps) {
   const [copied, setCopied] = useState(false);
+  const [isSpeaking, setIsSpeaking] = useState(false);
 
   const handleCopy = () => {
     navigator.clipboard.writeText(content);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
+  };
+
+  // Clean up markdown so the voice sounds natural
+  const cleanTextForSpeech = (text: string) => {
+    return text
+      .replace(/```[a-zA-Z]*\n?|\n```/g, ' ') // remove code block ticks
+      .replace(/`([^`]*)`/g, '$1') // remove inline code ticks
+      .replace(/[*_#>]/g, '') // remove markdown symbols
+      .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1') // read link text instead of url
+      .replace(/\n/g, '. '); // pause at line breaks
+  };
+
+  const handleSpeak = () => {
+    if (typeof window !== "undefined" && "speechSynthesis" in window) {
+      if (isSpeaking) {
+        window.speechSynthesis.cancel();
+        setIsSpeaking(false);
+      } else {
+        const utterance = new SpeechSynthesisUtterance(cleanTextForSpeech(content));
+        utterance.onend = () => setIsSpeaking(false);
+        utterance.onerror = () => setIsSpeaking(false);
+        window.speechSynthesis.speak(utterance);
+        setIsSpeaking(true);
+      }
+    }
   };
 
   const isIncoming = role === "assistant";
@@ -68,13 +92,23 @@ export function ChatMessage({ role, content, isStreaming, searchSteps }: ChatMes
       <div className="flex-1 overflow-hidden min-w-0" style={{ maxWidth: "calc(100% - 48px)" }}>
         <div className="mb-1 flex items-center gap-2">
           <span className="text-sm font-semibold font-mono">{isIncoming ? "CS Hub AI" : "You"}</span>
-          {isIncoming && (
-            <button
-              onClick={handleCopy}
-              className="opacity-0 group-hover:opacity-100 transition-opacity text-foreground/40 hover:text-primary"
-            >
-              {copied ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
-            </button>
+          {isIncoming && !isStreaming && (
+            <div className="flex items-center gap-1">
+              <button
+                onClick={handleCopy}
+                className="opacity-0 group-hover:opacity-100 transition-opacity text-foreground/40 hover:text-primary"
+                title="Copy text"
+              >
+                {copied ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
+              </button>
+              <button
+                onClick={handleSpeak}
+                className="opacity-0 group-hover:opacity-100 transition-opacity text-foreground/40 hover:text-primary"
+                title={isSpeaking ? "Stop speaking" : "Read aloud"}
+              >
+                {isSpeaking ? <Square className="h-3 w-3" /> : <Volume2 className="h-4 w-4" />}
+              </button>
+            </div>
           )}
         </div>
         
