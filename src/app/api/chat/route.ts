@@ -238,7 +238,7 @@ export async function POST(req: Request) {
               role: m.role === "assistant" ? "assistant" : "user",
               content: [
                 { type: "text", text: textContent || "What is in this image?" },
-                { type: "image_url", image_url: imageUrl }
+                { type: "image_url", image_url: { url: imageUrl } } // FIXED FORMATTING
               ]
             };
           }
