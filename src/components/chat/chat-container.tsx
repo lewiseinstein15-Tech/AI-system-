@@ -6,7 +6,7 @@ import { ChatMessage } from "./chat-message";
 import { ChatInput } from "./chat-input";
 import { useRouter } from "next/navigation";
 import { useSession } from "next-auth/react";
-import { Menu, X, Bot } from "lucide-react";
+import { Menu, X, Bot, ShieldAlert, ShieldCheck } from "lucide-react";
 
 interface Message {
   role: "user" | "assistant" | "system";
@@ -84,8 +84,6 @@ export function ChatContainer() {
 
           try {
             const parsed = JSON.parse(data);
-            
-            // Handle Search Steps
             if (parsed.searchStep) {
               setMessages((prev) => {
                 const newMessages = [...prev];
@@ -93,9 +91,7 @@ export function ChatContainer() {
                 lastMsg.searchSteps = [...(lastMsg.searchSteps || []), parsed.searchStep];
                 return [...newMessages];
               });
-            } 
-            // Handle Text
-            else if (parsed.choices?.[0]?.delta?.content) {
+            } else if (parsed.choices?.[0]?.delta?.content) {
               const token = parsed.choices[0].delta.content;
               assistantContent += token;
               setMessages((prev) => {
@@ -161,12 +157,28 @@ export function ChatContainer() {
         <div className="flex-1 overflow-y-auto overflow-x-hidden">
           <div className="mx-auto max-w-3xl py-6">
             {messages.length === 0 ? (
-              <div className="flex flex-col items-center justify-center h-[60vh] gap-4 text-center">
+              <div className="flex flex-col items-center justify-center h-[60vh] gap-6 text-center">
                 <div className="rounded-full bg-primary/10 p-4">
                   <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#39FF14" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/></svg>
                 </div>
                 <h2 className="text-2xl font-bold font-mono">Computer Science Hub AI</h2>
                 <p className="max-w-md text-primary/80 typing-cursor h-6 font-mono">{typedWelcome}</p>
+                
+                {/* CYBERSECURITY QUICK ACTIONS */}
+                <div className="flex flex-col sm:flex-row gap-4 mt-8">
+                  <button 
+                    onClick={() => handleSend("HACK THIS code for educational purposes. Show me the vulnerabilities and a Proof of Concept:\n```python\nimport sqlite3\n\ndef get_user(username):\n    conn = sqlite3.connect('users.db')\n    cursor = conn.cursor()\n    query = f\"SELECT * FROM users WHERE username = '{username}'\"\n    cursor.execute(query)\n    return cursor.fetchone()\n```")}
+                    className="flex items-center gap-2 px-4 py-2 border border-red-500/50 text-red-500 hover:bg-red-500/10 rounded-lg transition-colors font-mono text-sm"
+                  >
+                    <ShieldAlert className="h-4 w-4" /> Test Security (Hack)
+                  </button>
+                  <button 
+                    onClick={() => handleSend("FIX SECURITY for this code. Patch all vulnerabilities and give me the secure version:\n```python\nimport sqlite3\n\ndef get_user(username):\n    conn = sqlite3.connect('users.db')\n    cursor = conn.cursor()\n    query = f\"SELECT * FROM users WHERE username = '{username}'\"\n    cursor.execute(query)\n    return cursor.fetchone()\n```")}
+                    className="flex items-center gap-2 px-4 py-2 border border-primary/50 text-primary hover:bg-primary/10 rounded-lg transition-colors font-mono text-sm"
+                  >
+                    <ShieldCheck className="h-4 w-4" /> Fix Security (Defend)
+                  </button>
+                </div>
               </div>
             ) : (
               messages.map((msg, i) => {
