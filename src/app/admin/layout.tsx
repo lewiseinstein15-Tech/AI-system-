@@ -1,4 +1,5 @@
 "use client";
+
 import { useSession } from "next-auth/react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
@@ -16,7 +17,9 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
     if (session && session.user?.role !== "ADMIN") router.push("/unauthorized");
   }, [session, status, router]);
 
-  if (status === "loading") return <div className="flex h-screen items-center justify-center bg-background">Loading...</div>;
+  if (status === "loading") {
+    return <div className="flex h-screen items-center justify-center bg-background">Loading...</div>;
+  }
 
   const navItems = [
     { href: "/admin", label: "Overview", icon: Shield },
@@ -32,23 +35,23 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
         <button onClick={() => setMenuOpen(!menuOpen)}>
           {menuOpen ? <X className="h-6 w-6 text-primary" /> : <Menu className="h-6 w-6 text-primary" />}
         </button>
-        <h1 className="text-lg font-bold text-primary">Admin Panel</h1>
+        <h1 className="text-lg font-bold text-primary font-mono">Admin Panel</h1>
         <div className="w-6"></div>
       </div>
 
       <aside className={`fixed md:relative z-20 w-64 border-r border-border bg-accent/20 flex flex-col transition-transform duration-300 ${menuOpen ? "translate-x-0" : "-translate-x-full md:translate-x-0"}`}>
         <div className="p-6 border-b border-border hidden md:block">
-          <h2 className="text-xl font-bold text-primary">Admin Panel</h2>
+          <h2 className="text-xl font-bold text-primary font-mono">Admin Panel</h2>
         </div>
         <nav className="flex-1 p-4 space-y-1 mt-12 md:mt-0">
           {navItems.map((item) => (
-            <Link key={item.href} href={item.href} onClick={() => setMenuOpen(false)} className="flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium text-foreground/70 hover:bg-accent hover:text-primary transition-colors">
+            <Link key={item.href} href={item.href} onClick={() => setMenuOpen(false)} className="flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium text-foreground/70 hover:bg-accent hover:text-primary transition-colors font-mono">
               <item.icon className="h-5 w-5" /> {item.label}
             </Link>
           ))}
         </nav>
         <div className="p-4 border-t border-border">
-          <button onClick={() => signOut({ callbackUrl: "/login" })} className="flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium text-red-500 hover:bg-red-500/10 transition-colors w-full">
+          <button onClick={() => signOut({ callbackUrl: "/login" })} className="flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium text-red-500 hover:bg-red-500/10 transition-colors w-full font-mono">
             <LogOut className="h-5 w-5" /> Logout
           </button>
         </div>
