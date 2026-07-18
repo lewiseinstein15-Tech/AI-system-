@@ -100,7 +100,7 @@ export async function POST(req: Request) {
           title: userPrompt.substring(0, 30) + "...",
         },
       });
-      currentConvId = newConversation.id();
+      currentConvId = newConversation.id;
       
       await prisma.message.create({
         data: {
@@ -114,7 +114,6 @@ export async function POST(req: Request) {
     const lowerUserPrompt = userPrompt.toLowerCase();
     
     // --- INSTANT SEARCH TRIGGER ---
-    // If user says "search for", "search the web", or "look up", skip AI and search instantly!
     const isSearchIntent = lowerUserPrompt.startsWith("search for") || lowerUserPrompt.includes("search the web") || lowerUserPrompt.startsWith("look up") || lowerUserPrompt.startsWith("search ");
     
     if (isSearchIntent) {
@@ -136,7 +135,6 @@ export async function POST(req: Request) {
           sendStep("GitHub");
           sendStep("arXiv");
           
-          // Fetch all 6 sources with a 5-second timeout. If a source is slow, it gets skipped.
           const [wiki, ddg, hn, so, gh, arxiv] = await Promise.all([
             searchWiki(query).catch(() => null),
             searchDdg(query).catch(() => null),
@@ -186,7 +184,6 @@ export async function POST(req: Request) {
             aiText = `I searched Wikipedia, DuckDuckGo, Hacker News, StackOverflow, GitHub, and arXiv for "${query}", but couldn't find a direct answer.`;
           }
 
-          // Stream text instantly (0ms delay)
           const words = aiText.split(' ');
           for (const word of words) {
             const token = JSON.stringify({ choices: [{ delta: { content: word + ' ' } }] });
@@ -317,7 +314,7 @@ export async function POST(req: Request) {
       }
     }
 
-    // --- STREAM RESPONSE TO UI (0ms delay for instant typing) ---
+    // --- STREAM RESPONSE TO UI ---
     const encoder = new TextEncoder();
     const customStream = new ReadableStream({
       async start(controller) {
