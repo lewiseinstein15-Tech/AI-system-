@@ -1,9 +1,6 @@
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-import { groq } from '@ai-sdk/groq';
-import { generateText, tool } from 'ai';
-import { z } from 'zod';
 
 // Helper to truncate text so we don't crash the AI brain
 function truncate(str: string | null, max: number) {
@@ -84,12 +81,141 @@ async function searchArxiv(query: string) {
   return null;
 }
 
+// --- CLAUDE'S SELF-DEBUGGING PIPELINE ---
+const GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions";
+const PISTON_API_URL = "https://emkc.org/api/v2/piston/execute";
+const MAX_DEBUG_ROUNDS = 5;
+
+const SYSTEM_PROMPT = `You are CS Hub AI, an elite coding assistant.
+MANDATORY DEBUGGING WORKFLOW:
+1. Write your first attempt at the solution.
+2. You MUST call the execute_code tool to actually run it.
+3. Read the REAL output/error. Do not guess.
+4. If there is an error, FIX the code and call execute_code again. Repeat until correct.
+MANDATORY VERIFICATION:
+5. After passing execute_code, you MUST call stress_test_code for algorithmic problems. Write a simple brute-force solution and a random input generator.
+6. If stress_test_code reports mismatches, fix your algorithm and test again until 0 mismatches.
+7. Only after both tools pass should you give your final answer to the user. State what you verified.`;
+
+const TOOLS = [
+  {
+    type: "function",
+    function: {
+      name: "execute_code",
+      description: "Executes code in a real sandboxed interpreter and returns stdout, stderr, and exit code.",
+      parameters: {
+        type: "object",
+        properties: {
+          language: { type: "string", description: "Language to run, e.g. 'python', 'javascript'" },
+          code: { type: "string", description: "The complete code to execute" },
+          stdin: { type: "string", description: "Optional stdin input" }
+        },
+        required: ["language", "code"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "stress_test_code",
+      description: "Auto-generates N random test inputs and cross-checks an optimized solution against a brute-force reference.",
+      parameters: {
+        type: "object",
+        properties: {
+          function_name: { type: "string", description: "The exact function name both solutions must define." },
+          solution_code: { type: "string", description: "Complete Python code defining the optimized solution." },
+          brute_force_code: { type: "string", description: "Complete Python code defining a simple, obviously-correct reference function." },
+          generator_code: { type: "string", description: "Complete Python code defining a function generate_input() returning a tuple of arguments." },
+          num_trials: { type: "integer", description: "How many random trials to run. Default 200." }
+        },
+        required: ["function_name", "solution_code", "brute_force_code", "generator_code"],
+      },
+    },
+  }
+];
+
+const PISTON_LANGUAGE_MAP: Record<string, { language: string; version: string }> = {
+  python: { language: "python", version: "3.10.0" },
+  javascript: { language: "javascript", version: "18.15.0" },
+};
+
+async function runPiston(language: string, version: string, code: string, stdin: string = "") {
+  const res = await fetch(PISTON_API_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ language, version, files: [{ content: code }], stdin }),
+  });
+  if (!res.ok) throw new Error(`Sandbox failed with status ${res.status}`);
+  const data = await res.json();
+  return data.run || {};
+}
+
+async function executeCode(language: string, code: string, stdin: string = ""): Promise<string> {
+  const mapped = PISTON_LANGUAGE_MAP[language.toLowerCase()];
+  if (!mapped) return JSON.stringify({ error: `Unsupported language ${language}` });
+  try {
+    const run = await runPiston(mapped.language, mapped.version, code, stdin);
+    return JSON.stringify({ stdout: run.stdout ?? "", stderr: run.stderr ?? "", exit_code: run.code ?? null });
+  } catch (err: any) {
+    return JSON.stringify({ error: `Sandbox request failed: ${err.message}` });
+  }
+}
+
+async function stressTestCode(args: any): Promise<string> {
+  const trials = Math.min(Math.max(args.num_trials || 200, 1), 1000);
+  const harness = `
+import json
+ ${args.solution_code}
+_solution_fn = ${args.function_name}
+_brute_ns = {}
+exec(${JSON.stringify(args.brute_force_code)}, _brute_ns)
+_brute_fn = _brute_ns[${JSON.stringify(args.function_name)}]
+ ${args.generator_code}
+mismatches = []
+errors = []
+for i in range(${trials}):
+    try:
+        inputs = generate_input()
+        if not isinstance(inputs, tuple): inputs = (inputs,)
+    except Exception as e:
+        errors.append({"trial": i, "error": "gen err: " + str(e)}); continue
+    try: sol = _solution_fn(*inputs)
+    except Exception as e: errors.append({"trial": i, "inputs": repr(inputs), "error": "sol err: " + str(e)}); continue
+    try: bru = _brute_fn(*inputs)
+    except Exception as e: errors.append({"trial": i, "inputs": repr(inputs), "error": "brt err: " + str(e)}); continue
+    if sol != bru: mismatches.append({"trial": i, "inputs": repr(inputs), "sol": repr(sol), "brt": repr(bru)})
+    if len(mismatches) >= 5: break
+print(json.dumps({"trials": ${trials}, "mismatches": len(mismatches), "mismatches_list": mismatches[:5], "errors": errors[:5], "all_passed": len(mismatches)==0 and len(errors)==0}))
+`;
+  try {
+    const run = await runPiston("python", "3.10.0", harness, "");
+    return run.stdout?.trim() || JSON.stringify({ error: "No output", stderr: run.stderr });
+  } catch (err: any) {
+    return JSON.stringify({ error: `Stress test failed: ${err.message}` });
+  }
+}
+
+async function callGroq(messages: any[]) {
+  const res = await fetch(GROQ_API_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${process.env.GROQ_API_KEY}` },
+    body: JSON.stringify({
+      model: "llama-3.1-8b-instant", // Fixed hallucinated model name
+      messages,
+      tools: TOOLS,
+      tool_choice: "auto",
+      temperature: 0.15,
+      max_tokens: 4000,
+    }),
+  });
+  if (!res.ok) throw new Error(`Groq API error (${res.status})`);
+  return res.json();
+}
+
 export async function POST(req: Request) {
   try {
     const session = await getServerSession(authOptions);
-    if (!session) {
-      return new Response(JSON.stringify({ error: "Unauthorized" }), { status: 401 });
-    }
+    if (!session) return new Response(JSON.stringify({ error: "Unauthorized" }), { status: 401 });
 
     const { messages, conversationId } = await req.json();
     const userPrompt = messages[messages.length - 1].content;
@@ -98,20 +224,13 @@ export async function POST(req: Request) {
 
     if (!currentConvId) {
       const newConversation = await prisma.conversation.create({
-        data: {
-          userId: session.user.id,
-          title: userPrompt.substring(0, 30) + "...",
-        },
+        data: { userId: session.user.id, title: userPrompt.substring(0, 30) + "..." },
       });
       currentConvId = newConversation.id;
     }
     
     await prisma.message.create({
-      data: {
-        conversationId: currentConvId,
-        role: "user",
-        content: userPrompt,
-      },
+      data: { conversationId: currentConvId, role: "user", content: userPrompt },
     });
 
     const lowerUserPrompt = userPrompt.toLowerCase();
@@ -126,25 +245,12 @@ export async function POST(req: Request) {
       const encoder = new TextEncoder();
       const searchStream = new ReadableStream({
         async start(controller) {
-          const sendStep = (step: string) => {
-            const token = JSON.stringify({ searchStep: step });
-            controller.enqueue(encoder.encode(`data: ${token}\n\n`));
-          };
-          
-          sendStep("Wikipedia");
-          sendStep("DuckDuckGo");
-          sendStep("Hacker News");
-          sendStep("StackOverflow");
-          sendStep("GitHub");
-          sendStep("arXiv");
+          const sendStep = (step: string) => controller.enqueue(encoder.encode(`data: ${JSON.stringify({ searchStep: step })}\n\n`));
+          sendStep("Wikipedia"); sendStep("DuckDuckGo"); sendStep("Hacker News"); sendStep("StackOverflow"); sendStep("GitHub"); sendStep("arXiv");
           
           const [wiki, ddg, hn, so, gh, arxiv] = await Promise.all([
-            searchWiki(query).catch(() => null),
-            searchDdg(query).catch(() => null),
-            searchHn(query).catch(() => null),
-            searchSo(query).catch(() => null),
-            searchGh(query).catch(() => null),
-            searchArxiv(query).catch(() => null)
+            searchWiki(query).catch(() => null), searchDdg(query).catch(() => null), searchHn(query).catch(() => null),
+            searchSo(query).catch(() => null), searchGh(query).catch(() => null), searchArxiv(query).catch(() => null)
           ]);
 
           let searchContext = "";
@@ -158,189 +264,94 @@ export async function POST(req: Request) {
           let aiText = "";
           if (searchContext) {
             const synthesizeMessages = [
-              { role: "system", content: `You just searched 6 live internet sources for "${query}". Here are the raw search results:\n\n${searchContext}\n\nPlease read these results and give the user a smart, well-formatted summary answering their query. Mention which sources you found the information from. Keep your answer concise (max 500 words).` },
+              { role: "system", content: `You searched 6 sources for "${query}". Results:\n\n${searchContext}\n\nSummarize and cite sources.` },
               { role: "user", content: query }
             ];
-
-            const result = await generateText({
-              model: groq('llama-3.1-8b-instant'),
-              messages: synthesizeMessages,
-              temperature: 0.3
-            });
-            aiText = result.text;
+            const synthRes = await callGroq(synthesizeMessages);
+            aiText = synthRes.choices[0].message.content;
           } else {
-            aiText = `I searched Wikipedia, DuckDuckGo, Hacker News, StackOverflow, GitHub, and arXiv for "${query}", but couldn't find a direct answer. Try rephrasing your search.`;
+            aiText = `I searched for "${query}", but couldn't find a direct answer.`;
           }
 
           const words = aiText.split(' ');
           for (const word of words) {
-            const token = JSON.stringify({ choices: [{ delta: { content: word + ' ' } }] });
-            controller.enqueue(encoder.encode(`data: ${token}\n\n`));
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: word + ' ' } }] })}\n\n`));
           }
-          
           controller.enqueue(encoder.encode('data: [DONE]\n\n'));
           controller.close();
 
-          await prisma.message.create({
-            data: { conversationId: currentConvId, role: "assistant", content: aiText }
-          });
-          await prisma.conversation.update({
-            where: { id: currentConvId },
-            data: { updatedAt: new Date() }
-          });
+          await prisma.message.create({ data: { conversationId: currentConvId, role: "assistant", content: aiText } });
+          await prisma.conversation.update({ where: { id: currentConvId }, data: { updatedAt: new Date() } });
         }
       });
-
-      return new Response(searchStream, {
-        headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' }
-      });
+      return new Response(searchStream, { headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' } });
     }
 
-    // --- NATIVE TOOL CALLING PIPELINE ---
-    const isCodingQuestion = lowerUserPrompt.includes("code") || 
-                             lowerUserPrompt.includes("algorithm") || 
-                             lowerUserPrompt.includes("complexity") ||
-                             lowerUserPrompt.includes("trace") ||
-                             lowerUserPrompt.includes("solve") ||
-                             lowerUserPrompt.includes("substring") ||
-                             lowerUserPrompt.includes("string") ||
-                             lowerUserPrompt.includes("array") ||
-                             lowerUserPrompt.includes("tree") ||
-                             lowerUserPrompt.includes("graph") ||
-                             lowerUserPrompt.includes("dp") ||
-                             lowerUserPrompt.includes("dynamic programming");
-
+    // --- AUTONOMOUS CODE PIPELINE ---
+    const isCodingQuestion = lowerUserPrompt.includes("code") || lowerUserPrompt.includes("algorithm") || lowerUserPrompt.includes("trace") || lowerUserPrompt.includes("solve") || lowerUserPrompt.includes("string") || lowerUserPrompt.includes("array") || lowerUserPrompt.includes("tree") || lowerUserPrompt.includes("graph") || lowerUserPrompt.includes("dp");
     let aiText = "";
 
     if (isCodingQuestion) {
-      const systemPrompt = `You are CS Hub AI, an elite assistant. You solve coding problems by writing Python code and executing it.
-      Whenever you write code, you MUST call the execute_python tool to actually run it before presenting your final answer.
-      Never describe a trace, output, or test result without first executing the code and reading the real result. 
-      If execution fails, show the real error and fix your code using the tool again.
-      After the tool returns the output, explain the result, the approach, and the time/space complexity to the user.`;
-
-      const recentMessages = messages.slice(-4).map((m: any) => {
-        let safeContent = m.content;
-        if (safeContent.includes("data:image")) {
-          safeContent = "[User attached an image.]";
-        }
-        return { role: m.role === "assistant" ? "assistant" : "user", content: safeContent };
-      });
-
-      const result = await generateText({
-        model: groq('llama-3.1-8b-instant'),
-        messages: [
-          { role: "system", content: systemPrompt },
-          ...recentMessages
-        ],
-        temperature: 0.1,
-        maxSteps: 4, // Allow up to 4 loops of tool calling (write -> run -> fix -> run)
-        tools: {
-          execute_python: tool({
-            description: 'Executes Python code and returns stdout/stderr/errors',
-            parameters: z.object({
-              code: z.string().describe('Python code to run'),
-            }),
-            execute: async ({ code }) => {
-              try {
-                const pistonRes = await fetchWithTimeout("https://emkc.org/api/v2/piston/execute", {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({
-                    language: "python",
-                    version: "3.10.0",
-                    files: [{ name: "main.py", content: code }]
-                  })
-                }, 15000);
-
-                if (pistonRes.ok) {
-                  const pistonData = await pistonRes.json();
-                  const stdout = pistonData.run.output || "";
-                  const stderr = pistonData.run.stderr || "";
-                  return { stdout, stderr };
-                } else {
-                  return { stdout: "", stderr: "Sandbox rate limited or unavailable." };
-                }
-              } catch (e) {
-                return { stdout: "", stderr: "Execution network error." };
-              }
-            }
-          })
-        }
-      });
-      
-      aiText = result.text; // The SDK automatically handles the loop and returns the final explanation
-
-    } else {
-      // --- NORMAL AI CHAT (Non-Coding) ---
-      const systemPrompt = `You are CS Hub AI, an elite assistant created by Lewis Einstein (AI/ML Engineer) for Kibabii University. 
-      If asked who built you, say "I was built by Lewis Einstein, an AI and ML Engineer."
-      You have full memory of this conversation.
-      You have TOOLS. If you use one, output ONLY the command:
-      1. [ACTION:CREATE_FLASHCARD] Front: <text> | Back: <text>
-      2. [ACTION:SAVE_NOTE] Title: <text> | Content: <text>
-      3. [ACTION:CREATE_ASSIGNMENT] Title: <text> | Due: <YYYY-MM-DDTHH:MM:SS>
-      CYBERSECURITY MODES:
-      "HACK THIS" = Red Team analysis with PoC.
-      "FIX SECURITY" = Blue Team patched code.
-      If no tool or security mode is needed, answer normally with perfect markdown. Keep answers concise (max 800 words).`;
-
-      const recentMessages = messages.slice(-10);
-      
-      const aiMessages = [
-        { role: "system", content: systemPrompt },
-        ...recentMessages.map((m: any) => {
-          let safeContent = m.content;
-          if (safeContent.includes("data:image")) {
-            safeContent = "[User attached an image.]";
-          }
-          if (safeContent.length > 2000) {
-            safeContent = safeContent.substring(0, 2000) + "... [truncated]";
-          }
-          return { role: m.role === "assistant" ? "assistant" : "user", content: safeContent };
-        })
+      const groqMessages = [
+        { role: "system", content: SYSTEM_PROMPT },
+        ...messages.slice(-4).map((m: any) => ({ role: m.role === "assistant" ? "assistant" : "user", content: m.content.includes("data:image") ? "[Image]" : m.content }))
       ];
 
-      const result = await generateText({
-        model: groq('llama-3.1-8b-instant'),
-        messages: aiMessages,
-        temperature: 0.5
-      });
-      
-      aiText = result.text;
+      let debugRounds = 0;
+      while (debugRounds < MAX_DEBUG_ROUNDS) {
+        const response = await callGroq(groqMessages);
+        const message = response.choices?.[0]?.message;
+
+        if (message.tool_calls && message.tool_calls.length > 0) {
+          groqMessages.push(message);
+          for (const toolCall of message.tool_calls) {
+            const args = JSON.parse(toolCall.function.arguments);
+            let result = "";
+            if (toolCall.function.name === "execute_code") result = await executeCode(args.language, args.code, args.stdin || "");
+            else if (toolCall.function.name === "stress_test_code") result = await stressTestCode(args);
+            else result = JSON.stringify({ error: "Unknown tool" });
+            groqMessages.push({ role: "tool", tool_call_id: toolCall.id, content: result });
+          }
+          debugRounds++;
+        } else {
+          aiText = message.content || "";
+          break;
+        }
+      }
+      if (!aiText) aiText = "I tried to solve this but couldn't verify it properly. Here is my best attempt.";
+    } else {
+      // --- NORMAL AI CHAT ---
+      const systemPrompt = `You are CS Hub AI, created by Lewis Einstein. If asked who built you, say "I was built by Lewis Einstein." You have TOOLS. Output ONLY the command: 1. [ACTION:CREATE_FLASHCARD] Front: <text> | Back: <text> 2. [ACTION:SAVE_NOTE] Title: <text> | Content: <text> 3. [ACTION:CREATE_ASSIGNMENT] Title: <text> | Due: <YYYY-MM-DDTHH:MM:SS>`;
+      const recentMessages = messages.slice(-10);
+      const aiMessages = [
+        { role: "system", content: systemPrompt },
+        ...recentMessages.map((m: any) => ({ role: m.role === "assistant" ? "assistant" : "user", content: m.content.includes("data:image") ? "[Image]" : m.content }))
+      ];
+      const response = await callGroq(aiMessages);
+      aiText = response.choices[0].message.content;
     }
 
     const lowerAiText = aiText.toLowerCase();
-    
-    // 1. Flashcard
     if (lowerAiText.includes("action:create_flashcard") || (lowerUserPrompt.includes("create") && lowerUserPrompt.includes("flashcard"))) {
       const match = aiText.match(/Front:\s*(.*?)\s*\|\s*Back:\s*(.*)/i);
-      const front = match?.[1] || userPrompt.split("Front:")[1]?.split("|")[0]?.trim() || "";
-      const back = match?.[2] || userPrompt.split("Back:")[1]?.trim() || "";
-      if (front && back) {
-        await prisma.flashcard.create({ data: { front, back, userId: session.user.id } });
+      if (match) {
+        await prisma.flashcard.create({ data: { front: match[1].trim(), back: match[2].trim(), userId: session.user.id } });
         aiText = "✅ **Agent Action:** I have successfully created and saved that flashcard to your Dashboard!";
       }
-    } 
-    // 2. Note
-    else if (lowerAiText.includes("action:save_note") || (lowerUserPrompt.includes("save") && lowerUserPrompt.includes("note"))) {
+    } else if (lowerAiText.includes("action:save_note") || (lowerUserPrompt.includes("save") && lowerUserPrompt.includes("note"))) {
       const match = aiText.match(/Title:\s*(.*?)\s*\|\s*Content:\s*(.*)/i);
-      const title = match?.[1] || userPrompt.split("Title:")[1]?.split("|")[0]?.trim() || "Untitled Note";
-      const content = match?.[2] || userPrompt.split("Content:")[1]?.trim() || "";
-      if (title && content) {
-        await prisma.note.create({ data: { title, content, userId: session.user.id } });
+      if (match) {
+        await prisma.note.create({ data: { title: match[1].trim(), content: match[2].trim(), userId: session.user.id } });
         aiText = "✅ **Agent Action:** I have successfully saved that note to your Dashboard!";
       }
-    } 
-    // 3. Assignment
-    else if (lowerAiText.includes("action:create_assignment") || (lowerUserPrompt.includes("add") && lowerUserPrompt.includes("assignment"))) {
+    } else if (lowerAiText.includes("action:create_assignment") || (lowerUserPrompt.includes("add") && lowerUserPrompt.includes("assignment"))) {
       const match = aiText.match(/Title:\s*(.*?)\s*\|\s*Due:\s*(.*)/i);
-      const title = match?.[1] || userPrompt.split("Title:")[1]?.split("|")[0]?.trim() || "Untitled Assignment";
-      const dueStr = match?.[2] || userPrompt.split("Due:")[1]?.trim() || new Date().toISOString();
-      const dueDate = new Date(dueStr);
-      if (!isNaN(dueDate.getTime())) {
-        await prisma.assignment.create({ data: { title, dueDate, userId: session.user.id } });
-        aiText = "✅ **Agent Action:** I have successfully scheduled that assignment in your Dashboard!";
+      if (match) {
+        const dueDate = new Date(match[2].trim());
+        if (!isNaN(dueDate.getTime())) {
+          await prisma.assignment.create({ data: { title: match[1].trim(), dueDate, userId: session.user.id } });
+          aiText = "✅ **Agent Action:** I have successfully scheduled that assignment in your Dashboard!";
+        }
       }
     }
 
@@ -350,25 +361,16 @@ export async function POST(req: Request) {
       async start(controller) {
         const words = aiText.split(' ');
         for (const word of words) {
-          const token = JSON.stringify({ choices: [{ delta: { content: word + ' ' } }] });
-          controller.enqueue(encoder.encode(`data: ${token}\n\n`));
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: word + ' ' } }] })}\n\n`));
         }
         controller.enqueue(encoder.encode('data: [DONE]\n\n'));
         controller.close();
-
-        await prisma.message.create({
-          data: { conversationId: currentConvId, role: "assistant", content: aiText }
-        });
-        await prisma.conversation.update({
-          where: { id: currentConvId },
-          data: { updatedAt: new Date() }
-        });
+        await prisma.message.create({ data: { conversationId: currentConvId, role: "assistant", content: aiText } });
+        await prisma.conversation.update({ where: { id: currentConvId }, data: { updatedAt: new Date() } });
       },
     });
 
-    return new Response(customStream, {
-      headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' }
-    });
+    return new Response(customStream, { headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' } });
   } catch (error) {
     console.error("Chat API Error:", error);
     return new Response(JSON.stringify({ error: "Internal Server Error" }), { status: 500 });
