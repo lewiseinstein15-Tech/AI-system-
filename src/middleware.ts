@@ -6,14 +6,14 @@ export default withAuth(
     const token = req.nextauth.token;
     const path = req.nextUrl.pathname;
 
-    // Admin protection
+    // Protect admin routes
     if (path.startsWith("/admin") && token?.role !== "ADMIN") {
       return NextResponse.rewrite(new URL("/unauthorized", req.url));
     }
 
-    // Lecturer protection
-    if (path.startsWith("/lecturer") && token?.role !== "LECTURER" && token?.role !== "ADMIN") {
-      return NextResponse.rewrite(new URL("/unauthorized", req.url));
+    // Protect API admin routes
+    if (path.startsWith("/api/admin") && token?.role !== "ADMIN") {
+      return NextResponse.json({ error: "Forbidden" }, { status: 403 });
     }
 
     return NextResponse.next();
@@ -22,12 +22,9 @@ export default withAuth(
     callbacks: {
       authorized: ({ token }) => !!token,
     },
-    pages: {
-      signIn: "/login",
-    },
   }
 );
 
 export const config = {
-  matcher: ["/dashboard/:path*", "/admin/:path*", "/lecturer/:path*", "/api/admin/:path*"],
+  matcher: ["/dashboard/:path*", "/admin/:path*", "/api/admin/:path*"],
 };
