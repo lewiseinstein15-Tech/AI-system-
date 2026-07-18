@@ -96,6 +96,7 @@ export async function POST(req: Request) {
     let currentConvId = conversationId;
 
     if (!currentConvId) {
+      // Create new conversation if it doesn't exist
       const newConversation = await prisma.conversation.create({
         data: {
           userId: session.user.id,
@@ -103,15 +104,16 @@ export async function POST(req: Request) {
         },
       });
       currentConvId = newConversation.id;
-      
-      await prisma.message.create({
-        data: {
-          conversationId: currentConvId,
-          role: "user",
-          content: userPrompt,
-        },
-      });
     }
+    
+    // BUG FIX: ALWAYS save the user's prompt to the database, whether it's a new or existing chat
+    await prisma.message.create({
+      data: {
+        conversationId: currentConvId,
+        role: "user",
+        content: userPrompt,
+      },
+    });
 
     const lowerUserPrompt = userPrompt.toLowerCase();
     
@@ -161,7 +163,6 @@ export async function POST(req: Request) {
               { role: "user", content: query }
             ];
 
-            // Use Groq for synthesis
             const result = await generateText({
               model: groq('llama-3.1-8b-instant'),
               messages: synthesizeMessages
@@ -196,8 +197,10 @@ export async function POST(req: Request) {
     }
 
     // --- NORMAL AI CHAT & AGENT TOOLS ---
+    // Updated system prompt to explicitly tell the AI it has memory
     const systemPrompt = `You are CS Hub AI, an elite assistant created by Lewis Einstein (AI/ML Engineer) for Kibabii University. 
     If asked who built you, say "I was built by Lewis Einstein, an AI and ML Engineer."
+    You have full memory of this conversation. You can see the entire chat history provided to you. Do not say you don't save conversations, because your memory is handled by the system.
     You have COMMANDS. If you use one, output ONLY the command (NO JSON, NO markdown):
     1. [ACTION:CREATE_FLASHCARD] Front: <text> | Back: <text>
     2. [ACTION:SAVE_NOTE] Title: <text> | Content: <text>
@@ -205,7 +208,8 @@ export async function POST(req: Request) {
     4. [ACTION:RUN_CODE] <language> \n <code>
     If no command is needed, answer normally. Keep answers concise (max 800 words).`;
 
-    const recentMessages = messages.slice(-6);
+    // Keep the last 10 messages for memory
+    const recentMessages = messages.slice(-10);
     
     const aiMessages = [
       { role: "system", content: systemPrompt },
