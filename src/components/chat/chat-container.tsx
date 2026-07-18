@@ -4,7 +4,7 @@ import { useState, useEffect, useRef } from "react";
 import { Sidebar } from "./sidebar";
 import { ChatMessage } from "./chat-message";
 import { ChatInput } from "./chat-input";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useRouter } from "next/navigation";
 import { useSession } from "next-auth/react";
 import { Menu, X, Bot, ShieldAlert, ShieldCheck } from "lucide-react";
 
@@ -16,7 +16,6 @@ interface Message {
 
 export function ChatContainer() {
   const router = useRouter();
-  const searchParams = useSearchParams();
   const { data: session, status } = useSession();
   const [messages, setMessages] = useState<Message[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
@@ -121,15 +120,18 @@ export function ChatContainer() {
     }
   };
 
-  // Auto-send prompt from URL (for recommended topics)
+  // Auto-send prompt from URL (for recommended topics) - using window.location to avoid Suspense build errors
   useEffect(() => {
-    const prompt = searchParams.get('prompt');
-    if (status === "authenticated" && prompt && !hasInitialized) {
-      setHasInitialized(true);
-      handleSend(prompt);
+    if (typeof window !== "undefined" && status === "authenticated" && !hasInitialized) {
+      const params = new URLSearchParams(window.location.search);
+      const prompt = params.get('prompt');
+      if (prompt) {
+        setHasInitialized(true);
+        handleSend(prompt);
+      }
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [status, searchParams, hasInitialized]);
+  }, [status, hasInitialized]);
 
   const handleSelectConversation = async (id: string) => {
     setConversationId(id);
