@@ -100,7 +100,7 @@ function executeJsSafely(code: string): { stdout: string; stderr: string } {
 }
 
 // ============================================================
-// 1-CALL ACT LOOP (REASON + EXECUTE + CRITIQUE)
+// STRICT 4-PHASE ACT STATE MACHINE
 // ============================================================
 
 const MAX_ROUNDS = 2;
@@ -110,7 +110,6 @@ function extractJsCode(text: string): string | null {
   return match ? match[1].trim() : null;
 }
 
-// Independently re-executes code LOCALLY. Does not force a test input.
 function backendExecute(code: string): { ok: boolean; stdout: string; stderr: string } {
   try {
     const { stdout, stderr } = executeJsSafely(code);
@@ -118,6 +117,34 @@ function backendExecute(code: string): { ok: boolean; stdout: string; stderr: st
   } catch (e: any) {
     return { ok: false, stdout: "", stderr: `Execution error: ${e.message}` };
   }
+}
+
+// Stream a single AI state and return the full text
+async function streamAIState(
+  systemPrompt: string,
+  messages: any[],
+  temperature: number,
+  controller: any,
+  encoder: TextEncoder,
+  header: string
+): Promise<string> {
+  // Send the header to the UI
+  controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: header } }] })}\n\n`));
+  
+  const { result } = await streamWithFallback((model) => ({
+    model,
+    messages: [{ role: "system", content: systemPrompt }, ...messages],
+    temperature,
+    maxTokens: 2000,
+    maxRetries: 3,
+  }));
+
+  let text = "";
+  for await (const delta of result.textStream) {
+    text += delta;
+    controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: delta } }] })}\n\n`));
+  }
+  return text;
 }
 
 // ============================================================
@@ -265,7 +292,7 @@ export async function POST(req: Request) {
       return new Response(searchStream, { headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' } });
     }
 
-    // --- 1-CALL ACT LOOP (CODING QUESTIONS) ---
+    // --- 4-PHASE ACT STATE MACHINE (CODING QUESTIONS) ---
     const isCodingQuestion = lowerUserPrompt.includes("code") || lowerUserPrompt.includes("algorithm") || lowerUserPrompt.includes("trace") || lowerUserPrompt.includes("solve") || lowerUserPrompt.includes("string") || lowerUserPrompt.includes("array") || lowerUserPrompt.includes("tree") || lowerUserPrompt.includes("graph") || lowerUserPrompt.includes("dp");
 
     if (isCodingQuestion) {
@@ -275,21 +302,28 @@ export async function POST(req: Request) {
         return { role: m.role === "assistant" ? "assistant" : "user", content: safeContent };
       });
 
-      const ACT_PROMPT = `You are an elite AI coding assistant. You must follow this EXACT format:
+      // CLAUDE'S STRICT PROMPTS
+      const REASON_PROMPT = `You are an elite software engineer analyzing a coding problem.
+Analyze the problem concisely:
+- What are the exact inputs, outputs, and constraints?
+- If there are sequence constraints, you MUST state: "State design must track the last move. Position alone (dp[i]) is NEVER enough. I will use dp[i][last_move] [consecutive_count]."
+- What is the step-by-step algorithmic plan?
+- What is the time and space complexity?
+YOU MAY ONLY OUTPUT ONE PHASE. Do NOT write any code. Output ONLY analysis and a plan.`;
 
-1. **REASONING**: Analyze the problem.
-   - If there are sequence constraints (e.g., "no 3 consecutive moves", "cannot do X twice in a row"), you MUST state: "State design must track the last move. Position alone (dp[i]) is NEVER enough. I will use dp[i][last_move]."
-   - Outline the algorithm and complexity.
-2. **CODE**: Write the JavaScript solution.
-   - Wrap your solution in a single named function.
-   - Include a few \`console.log()\` test cases at the bottom of the code block to prove it works.
-3. **CRITIQUE**: Briefly verify your own state design handles the constraints.
+      const EXECUTE_PROMPT = `Based on the analysis, write the JavaScript solution.
+- Wrap your solution in a single named function.
+- Include a few \`console.log()\` test cases at the bottom of the code block.
+YOU MAY ONLY OUTPUT ONE PHASE. Output ONLY the code block.`;
 
-Begin!`;
+      const CRITIC_PROMPT = `You are a strict code reviewer. Analyze the provided code and analysis.
+- Does the code actually implement the state design described in the analysis?
+- Does the code enforce all constraints?
+Score the code from 0 to 100.
+YOU MAY ONLY OUTPUT ONE PHASE. Output ONLY the score and a brief critique.`;
 
       const encoder = new TextEncoder();
       let fullText = "";
-      let conversationHistory = [...recentMessages];
       let verified = false;
       let roundsUsed = 0;
       let lastCode = "";
@@ -304,32 +338,29 @@ Begin!`;
             for (let round = 1; round <= MAX_ROUNDS; round++) {
               roundsUsed = round;
 
-              const header = `\n🧠 **ACT ROUND ${round}...**\n\n`;
-              fullText += header;
-              controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: header } }] })}\n\n`));
+              // ── STATE 1: REASON ──
+              const reasonHeader = `\n🧠 **REASONING (Round ${round})...**\n\n`;
+              const reasonText = await streamAIState(REASON_PROMPT, recentMessages, 0.2, controller, encoder, reasonHeader);
+              fullText += reasonHeader + reasonText;
 
-              const { result } = await streamWithFallback((model) => ({
-                model,
-                messages: [{ role: "system", content: ACT_PROMPT }, ...conversationHistory],
-                temperature: 0.1,
-                maxTokens: 2000,
-                maxRetries: 3, 
-              }));
+              // ── STATE 2: EXECUTE ──
+              const executeHeader = `\n\n💻 **CODING...**\n\n`;
+              const executeMessages = [...recentMessages, { role: "assistant", content: reasonText }, { role: "user", content: "Write the code now." }];
+              const executeText = await streamAIState(EXECUTE_PROMPT, executeMessages, 0.1, controller, encoder, executeHeader);
+              fullText += executeHeader + executeText;
 
-              let aiText = "";
-              for await (const delta of result.textStream) {
-                aiText += delta;
-                controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: delta } }] })}\n\n`));
-              }
-              conversationHistory.push({ role: "assistant", content: aiText });
-              fullText += aiText;
+              // ── STATE 3: CRITIC ──
+              const criticHeader = `\n\n🕵️ **CRITIQUING...**\n\n`;
+              const criticMessages = [...recentMessages, { role: "assistant", content: reasonText }, { role: "assistant", content: executeText }, { role: "user", content: "Critique this code." }];
+              const criticText = await streamAIState(CRITIC_PROMPT, criticMessages, 0.2, controller, encoder, criticHeader);
+              fullText += criticHeader + criticText;
 
-              const code = extractJsCode(aiText);
+              // ── STATE 4: VERIFY ──
+              const code = extractJsCode(executeText);
               if (!code) {
                 const noCodeMsg = `\n\n⚠️ No code block found. Retrying...\n`;
                 fullText += noCodeMsg;
                 controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: noCodeMsg } }] })}\n\n`));
-                conversationHistory.push({ role: "user", content: "You did not provide a javascript code block. Provide one now." });
                 continue;
               }
 
@@ -355,10 +386,9 @@ Begin!`;
               }
               lastCode = code;
 
-              conversationHistory.push({
-                role: "user",
-                content: `Your code failed with this REAL error:\n\n${execResult.stderr}\n\nGo back to REASONING: What went wrong? What assumption was incorrect? What edge case did you miss?`
-              });
+              // Feed real error back for next round's REASON phase
+              recentMessages.push({ role: "assistant", content: reasonText + "\n" + executeText });
+              recentMessages.push({ role: "user", content: `Your code failed with this REAL error:\n\n${execResult.stderr}\n\nRe-analyze and fix it.` });
             }
 
             if (!verified) {
@@ -389,7 +419,19 @@ Begin!`;
 
     } else {
       // --- NORMAL AI CHAT ---
-      const systemPrompt = `You are CS Hub AI, created by Lewis Einstein. If asked who built you, say "I was built by Lewis Einstein." You have TOOLS. Output ONLY the command: 1. [ACTION:CREATE_FLASHCARD] Front: <text> | Back: <text> 2. [ACTION:SAVE_NOTE] Title: <text> | Content: <text> 3. [ACTION:CREATE_ASSIGNMENT] Title: <text> | Due: <YYYY-MM-DDTHH:MM:SS>`;
+      const systemPrompt = `You are CS Hub AI, an elite assistant created by Lewis Einstein (AI/ML Engineer) for Kibabii University. 
+      If asked who built you, say "I was built by Lewis Einstein, an AI and ML Engineer."
+      
+      You are a helpful, conversational AI. Answer questions clearly using markdown. 
+      
+      You have special commands (tools) that you can use to save things to the user's dashboard. You MUST ONLY output these commands if the user EXPLICITLY asks you to do so. Do not output these commands just to explain what you can do. 
+      
+      Commands:
+      - If the user explicitly says "create flashcard" or "save flashcard", output ONLY: [ACTION:CREATE_FLASHCARD] Front: <text> | Back: <text>
+      - If the user explicitly says "save note" or "create note", output ONLY: [ACTION:SAVE_NOTE] Title: <text> | Content: <text>
+      - If the user explicitly says "add assignment" or "schedule assignment", output ONLY: [ACTION:CREATE_ASSIGNMENT] Title: <text> | Due: <YYYY-MM-DDTHH:MM:SS>
+      
+      If the user just asks a general question (like "What can you do?"), explain your capabilities in plain English. Do not output the raw command syntax unless you are actually performing the action.`;
       const recentMessages = messages.slice(-6);
       const aiMessages = [
         { role: "system", content: systemPrompt },
