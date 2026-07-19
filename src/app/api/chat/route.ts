@@ -1,6 +1,9 @@
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
+import { groq } from '@ai-sdk/groq';
+import { streamText, tool } from 'ai';
+import { z } from 'zod';
 
 // Helper to truncate text
 function truncate(str: string | null, max: number) {
@@ -86,197 +89,16 @@ function checkForUnverifiedClaims(finalAnswer: string, toolCalls: any[]): { flag
   const claimsVerification = VERIFICATION_CLAIM_PATTERNS.some((re) => re.test(finalAnswer));
   if (!claimsVerification) return { flagged: false };
 
-  const ranStressTest = toolCalls.some((c: any) => c.type === "stress_test_code" && c.result?.all_passed === true);
   const ranExecuteCode = toolCalls.some((c: any) => c.type === "execute_code");
 
-  if (!ranStressTest && !ranExecuteCode) {
+  if (!ranExecuteCode) {
     return {
       flagged: true,
-      note: "⚠️ **System Warning:** This response claims the code was tested/verified, but no execute_code or stress_test_code tool was actually called in this session. Treat any 'verified' claim above with caution — it may be fabricated."
-    };
-  }
-
-  if (/stress test|brute force|random (cases|trials)/i.test(finalAnswer) && !ranStressTest) {
-    return {
-      flagged: true,
-      note: "⚠️ **System Warning:** This response references stress testing against a brute force / random trials, but stress_test_code was never actually called (or didn't return all_passed: true) in this session. Treat that specific claim with caution."
+      note: "⚠️ **System Warning:** This response claims the code was tested/verified, but no execute_code tool was actually called in this session. Treat any 'verified' claim above with caution — it may be fabricated."
     };
   }
 
   return { flagged: false };
-}
-
-// --- SELF-DEBUGGING PIPELINE ---
-const GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions";
-const PISTON_API_URL = "https://emkc.org/api/v2/piston/execute";
-const MAX_DEBUG_ROUNDS = 2; // Reduced to 2 to guarantee no Render timeouts
-
-const SYSTEM_PROMPT = `You are the CS Hub AI, an expert coding assistant.
-MANDATORY DEBUGGING WORKFLOW:
-1. Write your first attempt at the solution.
-2. You MUST invoke the execute_code tool to actually run it.
-3. Read the REAL output/error returned by the tool. Do not guess.
-4. If there is an error, FIX the code and invoke execute_code again. Repeat until correct.
-
-MANDATORY VERIFICATION:
-5. After passing execute_code, you MUST invoke stress_test_code for algorithmic problems. 
-6. If stress_test_code reports mismatches, fix your algorithm and test again until 0 mismatches.
-7. Only after both tools pass should you give your final answer to the user. State what you verified.
-
-ABSOLUTE RULE ON TOOL USAGE:
-- You CANNOT call tools by writing Python code like "execute_code(...)". That code will never run.
-- You MUST invoke the tool DIRECTLY using the native function calling mechanism (JSON format).
-- You must NEVER write prose claiming code was executed or verified unless you actually invoked the tool directly and are looking at its real returned result.`;
-
-const TOOLS = [
-  {
-    type: "function",
-    function: {
-      name: "execute_code",
-      description: "Executes code in a real sandboxed interpreter and returns stdout, stderr, and exit code.",
-      parameters: {
-        type: "object",
-        properties: {
-          language: { type: "string", description: "Language to run, e.g. 'python', 'javascript'" },
-          code: { type: "string", description: "The complete code to execute" },
-          stdin: { type: "string", description: "Optional stdin input" }
-        },
-        required: ["language", "code"],
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "stress_test_code",
-      description: "Auto-generates N random test inputs and cross-checks an optimized solution against a brute-force reference.",
-      parameters: {
-        type: "object",
-        properties: {
-          function_name: { type: "string", description: "The exact function name both solutions must define." },
-          solution_code: { type: "string", description: "Complete Python code defining the optimized solution." },
-          brute_force_code: { type: "string", description: "Complete Python code defining a simple, obviously-correct reference function." },
-          generator_code: { type: "string", description: "Complete Python code defining a function generate_input() returning a tuple of arguments." },
-          num_trials: { type: "integer", description: "How many random trials to run. Default 50." }
-        },
-        required: ["function_name", "solution_code", "brute_force_code", "generator_code"],
-      },
-    },
-  }
-];
-
-const PISTON_LANGUAGE_MAP: Record<string, { language: string; version: string }> = {
-  python: { language: "python", version: "3.10.0" },
-  javascript: { language: "javascript", version: "18.15.0" },
-};
-
-async function runPiston(language: string, version: string, code: string, stdin: string = "") {
-  const res = await fetchWithTimeout(
-    PISTON_API_URL,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ language, version, files: [{ content: code }], stdin }),
-    },
-    15000
-  );
-  if (!res.ok) throw new Error(`Sandbox failed with status ${res.status}`);
-  const data = await res.json();
-  return data.run || {};
-}
-
-async function executeCode(language: string, code: string, stdin: string = ""): Promise<string> {
-  const mapped = PISTON_LANGUAGE_MAP[language.toLowerCase()];
-  if (!mapped) return JSON.stringify({ error: `Unsupported language ${language}` });
-  try {
-    const run = await runPiston(mapped.language, mapped.version, code, stdin);
-    return JSON.stringify({ stdout: run.stdout ?? "", stderr: run.stderr ?? "", exit_code: run.code ?? null });
-  } catch (err: any) {
-    return JSON.stringify({ error: `Sandbox request failed: ${err.message}` });
-  }
-}
-
-async function stressTestCode(args: any): Promise<string> {
-  const trials = Math.min(Math.max(args.num_trials || 50, 1), 100);
-  
-  // CLAUDE'S FIX: Use exec() for ALL code blocks to completely prevent IndentationError in the harness
-  const harness = `
-import json
-_sol_ns = {}
-exec(${JSON.stringify(args.solution_code)}, _sol_ns)
-_solution_fn = _sol_ns[${JSON.stringify(args.function_name)}]
-
-_brute_ns = {}
-exec(${JSON.stringify(args.brute_force_code)}, _brute_ns)
-_brute_fn = _brute_ns[${JSON.stringify(args.function_name)}]
-
-_gen_ns = {}
-exec(${JSON.stringify(args.generator_code)}, _gen_ns)
-_gen_fn = _gen_ns['generate_input']
-
-mismatches = []
-errors = []
-for i in range(${trials}):
-    try:
-        inputs = _gen_fn()
-        if not isinstance(inputs, tuple): inputs = (inputs,)
-    except Exception as e:
-        errors.append({"trial": i, "error": "gen err: " + str(e)}); continue
-    try: sol = _solution_fn(*inputs)
-    except Exception as e: errors.append({"trial": i, "inputs": repr(inputs), "error": "sol err: " + str(e)}); continue
-    try: bru = _brute_fn(*inputs)
-    except Exception as e: errors.append({"trial": i, "inputs": repr(inputs), "error": "brt err: " + str(e)}); continue
-    if sol != bru: mismatches.append({"trial": i, "inputs": repr(inputs), "sol": repr(sol), "brt": repr(bru)})
-    if len(mismatches) >= 5: break
-print(json.dumps({"trials": ${trials}, "mismatches": len(mismatches), "mismatches_list": mismatches[:5], "errors": errors[:5], "all_passed": len(mismatches)==0 and len(errors)==0}))
-`;
-  try {
-    const run = await runPiston("python", "3.10.0", harness, "");
-    return run.stdout?.trim() || JSON.stringify({ error: "No output", stderr: run.stderr });
-  } catch (err: any) {
-    return JSON.stringify({ error: `Stress test failed: ${err.message}` });
-  }
-}
-
-async function callGroq(messages: any[], forceExecuteCode: boolean = false, useTools: boolean = true) {
-  if (!process.env.GROQ_API_KEY) {
-    throw new Error("GROQ_API_KEY is not set in environment variables");
-  }
-
-  const body: any = {
-    model: process.env.GROQ_MODEL || "llama-3.1-8b-instant",
-    messages,
-    temperature: 0.15,
-    max_tokens: 4000,
-  };
-
-  if (useTools) {
-    body.tools = TOOLS;
-    if (forceExecuteCode) {
-      body.tool_choice = { type: "function", function: { name: "execute_code" } };
-    } else {
-      body.tool_choice = "auto";
-    }
-  }
-
-  const res = await fetchWithTimeout(
-    GROQ_API_URL,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${process.env.GROQ_API_KEY}` },
-      body: JSON.stringify(body),
-    },
-    20000
-  );
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`Groq API error (${res.status}): ${text}`);
-  }
-  return res.json();
-}
-
-function safeParse(s: string) {
-  try { return JSON.parse(s); } catch { return { raw: s }; }
 }
 
 export async function POST(req: Request) {
@@ -334,21 +156,22 @@ export async function POST(req: Request) {
               { role: "system", content: `You searched 6 sources for "${query}". Results:\n\n${searchContext}\n\nSummarize and cite sources.` },
               { role: "user", content: query }
             ];
-            try {
-              const synthRes = await callGroq(synthesizeMessages, false, false);
-              aiText = synthRes.choices?.[0]?.message?.content
-                || `I found some results for "${query}" but couldn't summarize them. Please try again.`;
-            } catch (e: any) {
-              aiText = `I found results for "${query}" but the summarizer failed: ${e.message}`;
+            const result = await streamText({
+              model: groq('llama-3.1-8b-instant'),
+              messages: synthesizeMessages,
+              temperature: 0.3,
+              maxTokens: 1000, // Reduced to save TPM
+              maxRetries: 3 // Auto-retry on 429 rate limits
+            });
+            for await (const delta of result.textStream) {
+              controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: delta } }] })}\n\n`));
+              aiText += delta;
             }
           } else {
             aiText = `I searched for "${query}", but couldn't find a direct answer.`;
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: aiText } }] })}\n\n`));
           }
 
-          const words = aiText.split(' ');
-          for (const word of words) {
-            controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: word + ' ' } }] })}\n\n`));
-          }
           controller.enqueue(encoder.encode('data: [DONE]\n\n'));
           controller.close();
 
@@ -361,108 +184,168 @@ export async function POST(req: Request) {
 
     // --- AUTONOMOUS CODE PIPELINE ---
     const isCodingQuestion = lowerUserPrompt.includes("code") || lowerUserPrompt.includes("algorithm") || lowerUserPrompt.includes("trace") || lowerUserPrompt.includes("solve") || lowerUserPrompt.includes("string") || lowerUserPrompt.includes("array") || lowerUserPrompt.includes("tree") || lowerUserPrompt.includes("graph") || lowerUserPrompt.includes("dp");
-    let aiText = "";
-
+    
     if (isCodingQuestion) {
-      const groqMessages = [
-        { role: "system", content: SYSTEM_PROMPT },
-        ...messages.slice(-4).map((m: any) => ({ role: m.role === "assistant" ? "assistant" : "user", content: m.content.includes("data:image") ? "[Image]" : m.content }))
-      ];
-
-      let debugRounds = 0;
-      const executionLog: any[] = []; 
-
-      while (debugRounds < MAX_DEBUG_ROUNDS) {
-        const response = await callGroq(groqMessages, debugRounds === 0, true);
-        const message = response.choices?.[0]?.message;
-
-        if (!message) {
-          aiText = "The AI service returned an unexpected empty response. Please try again.";
-          break;
-        }
-
-        if (message.tool_calls && message.tool_calls.length > 0) {
-          groqMessages.push(message);
-          for (const toolCall of message.tool_calls) {
-            const args = JSON.parse(toolCall.function.arguments);
-            let result = "";
-            if (toolCall.function.name === "execute_code") {
-              result = await executeCode(args.language, args.code, args.stdin || "");
-              executionLog.push({ type: "execute_code", language: args.language, code: args.code, result: safeParse(result) });
-            } else if (toolCall.function.name === "stress_test_code") {
-              result = await stressTestCode(args);
-              executionLog.push({ type: "stress_test_code", function_name: args.function_name, num_trials: args.num_trials || 50, result: safeParse(result) });
-            } else {
-              result = JSON.stringify({ error: "Unknown tool" });
-            }
-            groqMessages.push({ role: "tool", tool_call_id: toolCall.id, content: result });
-          }
-          debugRounds++;
-        } else {
-          aiText = message.content || "";
-          break;
-        }
-      }
+      const systemPrompt = `You are the CS Hub AI, an expert coding assistant.
+      MANDATORY DEBUGGING WORKFLOW:
+      1. Write your first attempt at the solution.
+      2. You MUST invoke the execute_code tool to actually run it.
+      3. Read the REAL output/error returned by the tool. Do not guess.
+      4. If there is an error, FIX the code and invoke execute_code again. Repeat until correct.
+      5. Only after the tool passes should you give your final answer to the user. State what you verified.
       
-      if (!aiText) aiText = "I tried to solve this but couldn't verify it properly. Here is my best attempt.";
+      ABSOLUTE RULE ON TOOL USAGE:
+      - You CANNOT call tools by writing Python code like "execute_code(...)". That code will never run.
+      - You MUST invoke the tool DIRECTLY using the native function calling mechanism (JSON format).
+      - You must NEVER write prose claiming code was executed or verified unless you actually invoked the tool directly and are looking at its real returned result.`;
 
-      const verificationCheck = checkForUnverifiedClaims(aiText, executionLog);
-      if (verificationCheck.flagged) {
-        aiText = `${aiText}\n\n${verificationCheck.note}`;
-      }
+      // CLAUDE'S FIX: slice(-2) to reduce input tokens
+      const recentMessages = messages.slice(-2).map((m: any) => {
+        let safeContent = m.content;
+        if (safeContent.includes("data:image")) safeContent = "[User attached an image.]";
+        return { role: m.role === "assistant" ? "assistant" : "user", content: safeContent };
+      });
+
+      const toolCallLog: any[] = [];
+
+      const result = await streamText({
+        model: groq('llama-3.1-8b-instant'),
+        messages: [
+          { role: "system", content: systemPrompt },
+          ...recentMessages
+        ],
+        temperature: 0.1,
+        maxSteps: 3, 
+        maxTokens: 2000, // CLAUDE'S FIX: Reduced from 4000 to save TPM
+        maxRetries: 3, // CLAUDE'S FIX: Auto-retry on 429 rate limits
+        tools: {
+          execute_code: tool({
+            description: 'Executes Python code and returns stdout, stderr, and exit code.',
+            parameters: z.object({
+              code: z.string().describe('The complete Python code to execute'),
+            }),
+            execute: async ({ code }) => {
+              try {
+                const pistonRes = await fetchWithTimeout("https://emkc.org/api/v2/piston/execute", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({
+                    language: "python",
+                    version: "3.10.0",
+                    files: [{ name: "main.py", content: code }]
+                  })
+                }, 15000);
+
+                if (pistonRes.ok) {
+                  const pistonData = await pistonRes.json();
+                  const stdout = pistonData.run.output || "";
+                  const stderr = pistonData.run.stderr || "";
+                  toolCallLog.push({ type: "execute_code", result: { stdout, stderr } });
+                  return { stdout, stderr };
+                } else {
+                  toolCallLog.push({ type: "execute_code", result: { error: "Sandbox rate limited" } });
+                  return { stdout: "", stderr: "Sandbox rate limited or unavailable." };
+                }
+              } catch (e) {
+                toolCallLog.push({ type: "execute_code", result: { error: "Network error" } });
+                return { stdout: "", stderr: "Execution network error." };
+              }
+            }
+          })
+        }
+      });
+
+      // Stream the response to the UI
+      const encoder = new TextEncoder();
+      let fullText = "";
+      const customStream = new ReadableStream({
+        async start(controller) {
+          const heartbeat = setInterval(() => {
+            controller.enqueue(encoder.encode(`: heartbeat\n\n`));
+          }, 5000);
+
+          for await (const delta of result.textStream) {
+            fullText += delta;
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: delta } }] })}\n\n`));
+          }
+
+          clearInterval(heartbeat);
+
+          // Run Claude's hallucination check before closing the stream
+          const verificationCheck = checkForUnverifiedClaims(fullText, toolCallLog);
+          if (verificationCheck.flagged) {
+            const warning = `\n\n${verificationCheck.note}`;
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: warning } }] })}\n\n`));
+            fullText += warning;
+          }
+
+          controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+          controller.close();
+
+          await prisma.message.create({ data: { conversationId: currentConvId, role: "assistant", content: fullText } });
+          await prisma.conversation.update({ where: { id: currentConvId }, data: { updatedAt: new Date() } });
+        }
+      });
+
+      return new Response(customStream, { headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' } });
 
     } else {
       // --- NORMAL AI CHAT ---
       const systemPrompt = `You are CS Hub AI, created by Lewis Einstein. If asked who built you, say "I was built by Lewis Einstein." You have TOOLS. Output ONLY the command: 1. [ACTION:CREATE_FLASHCARD] Front: <text> | Back: <text> 2. [ACTION:SAVE_NOTE] Title: <text> | Content: <text> 3. [ACTION:CREATE_ASSIGNMENT] Title: <text> | Due: <YYYY-MM-DDTHH:MM:SS>`;
-      const recentMessages = messages.slice(-10);
+      const recentMessages = messages.slice(-6); // Reduced from 10 to save TPM
       const aiMessages = [
         { role: "system", content: systemPrompt },
         ...recentMessages.map((m: any) => ({ role: m.role === "assistant" ? "assistant" : "user", content: m.content.includes("data:image") ? "[Image]" : m.content }))
       ];
-      const response = await callGroq(aiMessages, false, false);
-      aiText = response.choices?.[0]?.message?.content || "I couldn't generate a response. Please try again.";
-    }
 
-    const lowerAiText = aiText.toLowerCase();
-    if (lowerAiText.includes("action:create_flashcard") || (lowerUserPrompt.includes("create") && lowerUserPrompt.includes("flashcard"))) {
-      const match = aiText.match(/Front:\s*(.*?)\s*\|\s*Back:\s*(.*)/i);
-      if (match) {
-        await prisma.flashcard.create({ data: { front: match[1].trim(), back: match[2].trim(), userId: session.user.id } });
-        aiText = "✅ **Agent Action:** I have successfully created and saved that flashcard to your Dashboard!";
-      }
-    } else if (lowerAiText.includes("action:save_note") || (lowerUserPrompt.includes("save") && lowerUserPrompt.includes("note"))) {
-      const match = aiText.match(/Title:\s*(.*?)\s*\|\s*Content:\s*(.*)/i);
-      if (match) {
-        await prisma.note.create({ data: { title: match[1].trim(), content: match[2].trim(), userId: session.user.id } });
-        aiText = "✅ **Agent Action:** I have successfully saved that note to your Dashboard!";
-      }
-    } else if (lowerAiText.includes("action:create_assignment") || (lowerUserPrompt.includes("add") && lowerUserPrompt.includes("assignment"))) {
-      const match = aiText.match(/Title:\s*(.*?)\s*\|\s*Due:\s*(.*)/i);
-      if (match) {
-        const dueDate = new Date(match[2].trim());
-        if (!isNaN(dueDate.getTime())) {
-          await prisma.assignment.create({ data: { title: match[1].trim(), dueDate, userId: session.user.id } });
-          aiText = "✅ **Agent Action:** I have successfully scheduled that assignment in your Dashboard!";
+      const result = await streamText({
+        model: groq('llama-3.1-8b-instant'),
+        messages: aiMessages,
+        temperature: 0.5,
+        maxTokens: 2000,
+        maxRetries: 3 // CLAUDE'S FIX: Auto-retry on 429 rate limits
+      });
+
+      const encoder = new TextEncoder();
+      let fullText = "";
+      const customStream = new ReadableStream({
+        async start(controller) {
+          for await (const delta of result.textStream) {
+            fullText += delta;
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: delta } }] })}\n\n`));
+          }
+          controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+          controller.close();
+
+          // Check for agent tools
+          const lowerAiText = fullText.toLowerCase();
+          if (lowerAiText.includes("action:create_flashcard") || (lowerUserPrompt.includes("create") && lowerUserPrompt.includes("flashcard"))) {
+            const match = fullText.match(/Front:\s*(.*?)\s*\|\s*Back:\s*(.*)/i);
+            if (match) {
+              await prisma.flashcard.create({ data: { front: match[1].trim(), back: match[2].trim(), userId: session.user.id } });
+            }
+          } else if (lowerAiText.includes("action:save_note") || (lowerUserPrompt.includes("save") && lowerUserPrompt.includes("note"))) {
+            const match = fullText.match(/Title:\s*(.*?)\s*\|\s*Content:\s*(.*)/i);
+            if (match) {
+              await prisma.note.create({ data: { title: match[1].trim(), content: match[2].trim(), userId: session.user.id } });
+            }
+          } else if (lowerAiText.includes("action:create_assignment") || (lowerUserPrompt.includes("add") && lowerUserPrompt.includes("assignment"))) {
+            const match = fullText.match(/Title:\s*(.*?)\s*\|\s*Due:\s*(.*)/i);
+            if (match) {
+              const dueDate = new Date(match[2].trim());
+              if (!isNaN(dueDate.getTime())) {
+                await prisma.assignment.create({ data: { title: match[1].trim(), dueDate, userId: session.user.id } });
+              }
+            }
+          }
+
+          await prisma.message.create({ data: { conversationId: currentConvId, role: "assistant", content: fullText } });
+          await prisma.conversation.update({ where: { id: currentConvId }, data: { updatedAt: new Date() } });
         }
-      }
+      });
+
+      return new Response(customStream, { headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' } });
     }
-
-    // --- STREAM RESPONSE TO UI ---
-    const encoder = new TextEncoder();
-    const customStream = new ReadableStream({
-      async start(controller) {
-        const words = aiText.split(' ');
-        for (const word of words) {
-          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: word + ' ' } }] })}\n\n`));
-        }
-        controller.enqueue(encoder.encode('data: [DONE]\n\n'));
-        controller.close();
-        await prisma.message.create({ data: { conversationId: currentConvId, role: "assistant", content: aiText } });
-        await prisma.conversation.update({ where: { id: currentConvId }, data: { updatedAt: new Date() } });
-      },
-    });
-
-    return new Response(customStream, { headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' } });
   } catch (error: any) {
     console.error("Chat API Error:", error);
     return new Response(JSON.stringify({ error: "Internal Server Error", details: error.message }), { status: 500 });
