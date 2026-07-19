@@ -74,6 +74,67 @@ async function fetchWithTimeout(url: string, options: any = {}, ms: number = 500
   }
 }
 
+// --- CLAUDE'S BACKEND-ENFORCED VERIFICATION ---
+async function backendVerify(aiResponseText: string): Promise<string> {
+  // Extract the last Python code block from the AI's response
+  const codeMatches = [...aiResponseText.matchAll(/```python\n?([\s\S]*?)```/g)];
+  if (codeMatches.length === 0) return ""; // No code found to verify
+
+  const finalCode = codeMatches[codeMatches.length - 1][1].trim();
+
+  // Extract function name to build the test harness
+  const funcMatch = finalCode.match(/def\s+(\w+)\s*\(/);
+  if (!funcMatch) {
+    // If it's just a script, run it as-is
+    const res = await fetchWithTimeout("https://emkc.org/api/v2/piston/execute", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ language: "python", version: "3.10.0", files: [{ name: "verify.py", content: finalCode }] })
+    }, 15000);
+
+    if (!res.ok) return "\n\n⚠️ **Backend Verification Failed** (Sandbox unavailable).";
+    const data = await res.json();
+    return `\n\n✅ **Backend-verified output** (independently re-run by the server, not self-reported by the AI):\n\`\`\`\n${data.run.output || data.run.stderr}\n\`\`\``;
+  }
+
+  const funcName = funcMatch[1];
+  const testHarness = `
+ ${finalCode}
+
+results = []
+for n in range(0, 16):
+    try:
+        results.append(${funcName}(n))
+    except Exception as e:
+        results.append(f"Error:{e}")
+print(results)
+`;
+
+  try {
+    const res = await fetchWithTimeout("https://emkc.org/api/v2/piston/execute", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        language: "python",
+        version: "3.10.0",
+        files: [{ name: "verify.py", content: testHarness }]
+      })
+    }, 15000);
+
+    if (!res.ok) return "\n\n⚠️ **Backend Verification Failed** (Sandbox unavailable).";
+
+    const data = await res.json();
+    const stdout = data.run.output?.trim();
+    const stderr = data.run.stderr?.trim();
+
+    if (stderr) return `\n\n⚠️ **Backend re-execution found an error the model missed:**\n\`\`\`\n${stderr}\n\`\`\``;
+    return `\n\n✅ **Backend-verified output** (independently re-run by the server for n=0 to 15, not self-reported by the AI):\n\`\`\`\n${stdout}\n\`\`\``;
+  } catch (e: any) {
+    return `\n\n⚠️ **Backend Verification Failed** (Network error: ${e.message}).`;
+  }
+}
+
+
 // --- MEGA SEARCH AGENT HELPERS ---
 async function searchWiki(query: string) {
   const searchRes = await fetchWithTimeout(`https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(query)}&format=json&origin=*`);
@@ -122,59 +183,6 @@ async function searchArxiv(query: string) {
   const titles = [...xmlText.matchAll(/<title>(.*?)<\/title>/g)].map(m => m[1]).filter(t => t !== "arXiv Query Result");
   if (titles.length > 0) return `arXiv Papers: ${titles.join(' | ')}`;
   return null;
-}
-
-// --- CLAUDE'S STRICT HALLUCINATION CHECK ---
-const VERIFICATION_CLAIM_PATTERNS = [
-  /verified/i,
-  /passes? all( the)? tests?/i,
-  /tested against/i,
-  /ran (this|the) (code|solution)/i,
-  /confirmed (to be )?correct/i,
-  /0 mismatches/i,
-  /brute.?force/i
-];
-
-function checkForUnverifiedClaims(finalAnswer: string, toolCalls: any[]): { flagged: boolean; note?: string } {
-  const claimsVerification = VERIFICATION_CLAIM_PATTERNS.some((re) => re.test(finalAnswer));
-  if (!claimsVerification) return { flagged: false };
-
-  const executeCalls = toolCalls.filter((c: any) => c.type === "execute_code");
-  if (executeCalls.length === 0) {
-    return {
-      flagged: true,
-      note: "⚠️ **System Warning:** This response claims the code was tested/verified, but no execute_code tool was actually called. Treat any 'verified' claim as fabricated."
-    };
-  }
-
-  // Gather all real stdout from the sandbox
-  const realOutput = executeCalls.map(c => c.result?.stdout || "").join("\n").trim();
-  
-  // Check if the AI claims a specific final number/answer
-  // Looks for "answer is 18", "result is 18", "total of 18", "output: 18"
-  const finalNumberMatch = finalAnswer.match(/(?:answer is|result is|total of|output is|output:)\s*\*?\*?(\d+)\b/i);
-  if (finalNumberMatch && finalNumberMatch[1]) {
-    const claimedAnswer = finalNumberMatch[1];
-    // If the claimed number is NOT in the real stdout, it's a hallucination
-    if (!realOutput.includes(claimedAnswer)) {
-      return {
-        flagged: true,
-        note: `⚠️ **System Warning:** The AI claims the final answer is ${claimedAnswer}, but the executed code's output does not contain this number. The answer may be fabricated.`
-      };
-    }
-  }
-
-  // Check if it claims brute force testing, but stdout doesn't show proof
-  if (/brute.?force|tested.*\d+.*\d+|n=\d+ to \d+|0 mismatches/i.test(finalAnswer)) {
-    if (!/pass|0 mismatch|success|all correct|true/i.test(realOutput)) {
-       return {
-         flagged: true,
-         note: "⚠️ **System Warning:** This response claims extensive verification (e.g., brute-force testing), but the actual sandbox execution output does not contain matching proof. The verification claims may be fabricated."
-       };
-    }
-  }
-
-  return { flagged: false };
 }
 
 export async function POST(req: Request) {
@@ -358,7 +366,7 @@ export async function POST(req: Request) {
           }, 5000);
 
           try {
-            // FIX: Use fullStream to catch tool calls AND display real sandbox output to the UI
+            // Use fullStream to catch tool calls AND display real sandbox output to the UI
             for await (const part of streamResult.fullStream) {
               if (part.type === 'text-delta') {
                 fullText += part.textDelta;
@@ -388,13 +396,11 @@ export async function POST(req: Request) {
           } finally {
             clearInterval(heartbeat);
 
-            const verificationCheck = checkForUnverifiedClaims(fullText, toolCallLog);
-            if (verificationCheck.flagged) {
-              const warning = `\n\n${verificationCheck.note}`;
-              if (!fullText.includes(warning)) {
-                controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: warning } }] })}\n\n`));
-                fullText += warning;
-              }
+            // CLAUDE'S BACKEND VERIFICATION
+            const verificationMsg = await backendVerify(fullText);
+            if (verificationMsg) {
+              controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: verificationMsg } }] })}\n\n`));
+              fullText += verificationMsg;
             }
 
             controller.enqueue(encoder.encode('data: [DONE]\n\n'));
