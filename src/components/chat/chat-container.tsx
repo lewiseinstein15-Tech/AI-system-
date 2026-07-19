@@ -85,11 +85,14 @@ export function ChatContainer() {
 
           try {
             const parsed = JSON.parse(data);
+            
             if (parsed.searchStep) {
               setMessages((prev) => {
                 const newMessages = [...prev];
                 const lastMsg = newMessages[newMessages.length - 1];
-                lastMsg.searchSteps = [...(lastMsg.searchSteps || []), parsed.searchStep];
+                if (lastMsg) {
+                  lastMsg.searchSteps = [...(lastMsg.searchSteps || []), parsed.searchStep];
+                }
                 return [...newMessages];
               });
             } else if (parsed.choices?.[0]?.delta?.content) {
@@ -97,22 +100,26 @@ export function ChatContainer() {
               assistantContent += token;
               setMessages((prev) => {
                 const newMessages = [...prev];
-                newMessages[newMessages.length - 1] = {
-                  role: "assistant",
-                  content: assistantContent,
-                  searchSteps: newMessages[newMessages.length - 1].searchSteps
-                };
-                return newMessages;
+                const lastMsg = newMessages[newMessages.length - 1];
+                if (lastMsg) {
+                  lastMsg.content = assistantContent;
+                }
+                return [...newMessages];
               });
             }
-          } catch (e) {}
+          } catch (e) {
+            // Ignore JSON parse errors for incomplete chunks
+          }
         }
       }
     } catch (error) {
       console.error("Chat Error:", error);
       setMessages((prev) => {
         const newMessages = [...prev];
-        newMessages[newMessages.length - 1] = { role: "assistant", content: "Error: Unable to fetch response." };
+        const lastMsg = newMessages[newMessages.length - 1];
+        if (lastMsg) {
+          lastMsg.content = "Error: Unable to fetch response.";
+        }
         return newMessages;
       });
     } finally {
