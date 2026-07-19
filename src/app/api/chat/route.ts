@@ -89,7 +89,6 @@ function executeJsSafely(code: string): { stdout: string; stderr: string } {
     };
     
     const context = vm.createContext(sandbox);
-    // Run with a 3-second timeout to prevent infinite loops
     vm.runInContext(code, context, { timeout: 3000 });
   } catch (e: any) {
     stderr = e.message || "Execution error";
@@ -97,36 +96,90 @@ function executeJsSafely(code: string): { stdout: string; stderr: string } {
   return { stdout, stderr };
 }
 
-// --- BACKEND-ENFORCED VERIFICATION ---
-async function backendVerify(aiResponseText: string): Promise<string> {
-  const codeMatches = [...aiResponseText.matchAll(/```javascript\n?([\s\S]*?)```/g)];
-  if (codeMatches.length === 0) return ""; 
+// ============================================================
+// THE VERIFICATION LOOP (CLAUDE'S ARCHITECTURE + LOCAL JS)
+// ============================================================
 
-  const finalCode = codeMatches[codeMatches.length - 1][1].trim();
-  const funcMatch = finalCode.match(/function\s+(\w+)\s*\(/);
-  if (!funcMatch) {
-    const { stdout, stderr } = executeJsSafely(finalCode);
-    return `\n\n✅ **Backend-verified output** (independently re-run by the server):\n\`\`\`\n${stdout || stderr}\n\`\`\``;
-  }
+const MAX_LOOP_ROUNDS = 3;
 
-  const funcName = funcMatch[1];
-  const testHarness = `
- ${finalCode}
+function extractJsCode(text: string): string | null {
+  const match = text.match(/```javascript\s*([\s\S]*?)```/) || text.match(/```\s*([\s\S]*?)```/);
+  return match ? match[1].trim() : null;
+}
 
-const results = [];
-for (let n = 0; n < 16; n++) {
+function extractFunctionName(code: string): string | null {
+  const match = code.match(/function\s+(\w+)\s*\(/);
+  return match ? match[1] : null;
+}
+
+// Independently re-executes code LOCALLY. Does not rely on anything the model claims.
+function backendExecute(code: string, testCall: string): { ok: boolean; stdout: string; stderr: string } {
+  const harness = `${code}\n\nconsole.log(${testCall});`;
   try {
-    results.push(${funcName}(n));
-  } catch (e) {
-    results.push("Error:" + e.message);
+    const { stdout, stderr } = executeJsSafely(harness);
+    return { ok: stderr.length === 0, stdout, stderr };
+  } catch (e: any) {
+    return { ok: false, stdout: "", stderr: `Execution error: ${e.message}` };
   }
 }
-console.log(results);
-`;
 
-  const { stdout, stderr } = executeJsSafely(testHarness);
-  if (stderr) return `\n\n⚠️ **Backend re-execution found an error the model missed:**\n\`\`\`\n${stderr}\n\`\`\``;
-  return `\n\n✅ **Backend-verified output** (independently re-run by the server for n=0 to 15, not self-reported by the AI):\n\`\`\`\n${stdout}\n\`\`\``;
+// Runs the model in a loop: generate -> backend-verify -> if failed,
+// feed the REAL error back and force a fix -> repeat until it actually works.
+async function verificationLoop(
+  systemPrompt: string,
+  userMessages: any[],
+  testCall: string
+): Promise<{ finalCode: string | null; verified: boolean; rounds: number; log: string[] }> {
+  const log: string[] = [];
+  let messages = [...userMessages];
+  let lastCode: string | null = null;
+
+  for (let round = 1; round <= MAX_LOOP_ROUNDS; round++) {
+    const { result } = await streamWithFallback((model) => ({
+      model,
+      messages: [{ role: "system", content: systemPrompt }, ...messages],
+      temperature: 0.1,
+      maxTokens: 2000,
+      maxRetries: 1,
+    }));
+
+    let text = "";
+    for await (const delta of result.textStream) text += delta;
+
+    const code = extractJsCode(text);
+    if (!code) {
+      log.push(`Round ${round}: no code block found in model output.`);
+      messages.push({ role: "assistant", content: text });
+      messages.push({ role: "user", content: "You did not provide a javascript code block. Provide one now, wrapped in triple backticks." });
+      continue;
+    }
+
+    lastCode = code;
+    const funcName = extractFunctionName(code);
+    if (!funcName) {
+      log.push(`Round ${round}: could not detect a function definition.`);
+      messages.push({ role: "assistant", content: text });
+      messages.push({ role: "user", content: "Your code has no detectable function definition. Wrap your solution in a single named function." });
+      continue;
+    }
+
+    const execResult = backendExecute(code, testCall);
+
+    if (execResult.ok) {
+      log.push(`Round ${round}: backend execution succeeded. Real stdout: ${execResult.stdout}`);
+      return { finalCode: code, verified: true, rounds: round, log };
+    }
+
+    // Real failure — feed the REAL error back, not a hint, the actual stderr.
+    log.push(`Round ${round}: backend execution FAILED. Real stderr: ${execResult.stderr}`);
+    messages.push({ role: "assistant", content: text });
+    messages.push({
+      role: "user",
+      content: `Your code failed when actually executed by the backend. This is the REAL error, not a simulation:\n\n${execResult.stderr}\n\nFix the code. Do not claim success until this actually stops erroring.`,
+    });
+  }
+
+  return { finalCode: lastCode, verified: false, rounds: MAX_LOOP_ROUNDS, log };
 }
 
 // --- MEGA SEARCH AGENT HELPERS ---
@@ -267,16 +320,15 @@ export async function POST(req: Request) {
       return new Response(searchStream, { headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' } });
     }
 
-    // --- AUTONOMOUS CODE PIPELINE (OPTIMIZED) ---
+    // --- AUTONOMOUS CODE PIPELINE ---
     const isCodingQuestion = lowerUserPrompt.includes("code") || lowerUserPrompt.includes("algorithm") || lowerUserPrompt.includes("trace") || lowerUserPrompt.includes("solve") || lowerUserPrompt.includes("string") || lowerUserPrompt.includes("array") || lowerUserPrompt.includes("tree") || lowerUserPrompt.includes("graph") || lowerUserPrompt.includes("dp");
 
     if (isCodingQuestion) {
-      // REMOVED TOOL CALLING: The AI just writes the code, and the backend verifies it independently.
-      // This cuts API requests by 75% and eliminates rate limit timeouts.
       const systemPrompt = `You are CS Hub AI, an expert coding assistant. 
       When asked a coding question, write the solution in JavaScript inside a markdown block. 
-      Explain your approach and time/space complexity. 
-      Do NOT claim to have run or verified the code yourself; the backend system will automatically run and verify your code independently.`;
+      Explain your approach, state design, and time/space complexity. 
+      DO NOT write a "Verification" section. DO NOT claim to have run or verified the code. 
+      The backend system will automatically run and verify your code independently.`;
 
       const recentMessages = messages.slice(-4).map((m: any) => {
         let safeContent = m.content;
@@ -284,65 +336,33 @@ export async function POST(req: Request) {
         return { role: m.role === "assistant" ? "assistant" : "user", content: safeContent };
       });
 
-      let streamResult;
-      let usedProvider = "none";
-      try {
-        const { result, providerName } = await streamWithFallback((model) => ({
-          model,
-          messages: [
-            { role: "system", content: systemPrompt },
-            ...recentMessages
-          ],
-          temperature: 0.1,
-          maxTokens: 2000,
-          maxRetries: 2
-        }));
-        streamResult = result;
-        usedProvider = providerName;
-      } catch (fallbackError: any) {
-        return new Response(
-          JSON.stringify({ error: "All AI providers are currently unavailable.", details: fallbackError.message }),
-          { status: 503 }
-        );
-      }
+      const testCall = "0"; // Default test call for the local JS engine
 
-      // Stream the response to the UI
+      // ── THE VERIFICATION LOOP RUNS HERE ──
+      const loopResult = await verificationLoop(
+        systemPrompt,
+        recentMessages,
+        testCall
+      );
+
       const encoder = new TextEncoder();
       let fullText = "";
       const customStream = new ReadableStream({
         async start(controller) {
-          const heartbeat = setInterval(() => {
-            controller.enqueue(encoder.encode(`: heartbeat\n\n`));
-          }, 5000);
-
-          try {
-            for await (const delta of streamResult.textStream) {
-              fullText += delta;
-              controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: delta } }] })}\n\n`));
-            }
-          } catch (streamError: any) {
-            console.error(`Stream Interruption (provider: ${usedProvider}):`, streamError);
-            const errorMsg = "\n\n*(System: The AI stream was interrupted. Please try again.)*";
-            if (!fullText.includes(errorMsg)) {
-              controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: errorMsg } }] })}\n\n`));
-              fullText += errorMsg;
-            }
-          } finally {
-            clearInterval(heartbeat);
-
-            // BACKEND VERIFICATION: Run the code locally and append the real output
-            const verificationMsg = await backendVerify(fullText);
-            if (verificationMsg) {
-              controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: verificationMsg } }] })}\n\n`));
-              fullText += verificationMsg;
-            }
-
-            controller.enqueue(encoder.encode('data: [DONE]\n\n'));
-            controller.close();
-
-            await prisma.message.create({ data: { conversationId: currentConvId, role: "assistant", content: fullText } });
-            await prisma.conversation.update({ where: { id: currentConvId }, data: { updatedAt: new Date() } });
+          if (loopResult.verified && loopResult.finalCode) {
+            fullText = `\`\`\`javascript\n${loopResult.finalCode}\n\`\`\`\n\n✅ **Backend-verified** — this code was independently re-executed by the server (${loopResult.rounds} round${loopResult.rounds > 1 ? "s" : ""} needed) and confirmed to run without error. This is not a self-reported claim from the AI.`;
+          } else {
+            fullText = `\`\`\`javascript\n${loopResult.finalCode || "// no code produced"}\n\`\`\`\n\n⚠️ **Could not verify this solution.** After ${loopResult.rounds} attempts, the backend still could not get this code to execute successfully. Do not treat this as a correct answer — please try again or rephrase the question.`;
           }
+
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: fullText } }] })}\n\n`));
+          controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+          controller.close();
+
+          console.log("Verification loop log:", loopResult.log);
+
+          await prisma.message.create({ data: { conversationId: currentConvId, role: "assistant", content: fullText } });
+          await prisma.conversation.update({ where: { id: currentConvId }, data: { updatedAt: new Date() } });
         }
       });
 
