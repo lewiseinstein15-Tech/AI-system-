@@ -160,8 +160,8 @@ export async function POST(req: Request) {
               model: groq('llama-3.1-8b-instant'),
               messages: synthesizeMessages,
               temperature: 0.3,
-              maxTokens: 1000, // Reduced to save TPM
-              maxRetries: 3 // Auto-retry on 429 rate limits
+              maxTokens: 1000,
+              maxRetries: 3
             });
             for await (const delta of result.textStream) {
               controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: delta } }] })}\n\n`));
@@ -199,7 +199,6 @@ export async function POST(req: Request) {
       - You MUST invoke the tool DIRECTLY using the native function calling mechanism (JSON format).
       - You must NEVER write prose claiming code was executed or verified unless you actually invoked the tool directly and are looking at its real returned result.`;
 
-      // CLAUDE'S FIX: slice(-2) to reduce input tokens
       const recentMessages = messages.slice(-2).map((m: any) => {
         let safeContent = m.content;
         if (safeContent.includes("data:image")) safeContent = "[User attached an image.]";
@@ -216,8 +215,9 @@ export async function POST(req: Request) {
         ],
         temperature: 0.1,
         maxSteps: 3, 
-        maxTokens: 2000, // CLAUDE'S FIX: Reduced from 4000 to save TPM
-        maxRetries: 3, // CLAUDE'S FIX: Auto-retry on 429 rate limits
+        maxTokens: 3000, // Increased slightly to prevent cutoff
+        maxRetries: 3,
+        toolChoice: 'required', // CLAUDE'S FIX: Force the AI to call the tool natively instead of writing JSON text
         tools: {
           execute_code: tool({
             description: 'Executes Python code and returns stdout, stderr, and exit code.',
@@ -292,7 +292,7 @@ export async function POST(req: Request) {
     } else {
       // --- NORMAL AI CHAT ---
       const systemPrompt = `You are CS Hub AI, created by Lewis Einstein. If asked who built you, say "I was built by Lewis Einstein." You have TOOLS. Output ONLY the command: 1. [ACTION:CREATE_FLASHCARD] Front: <text> | Back: <text> 2. [ACTION:SAVE_NOTE] Title: <text> | Content: <text> 3. [ACTION:CREATE_ASSIGNMENT] Title: <text> | Due: <YYYY-MM-DDTHH:MM:SS>`;
-      const recentMessages = messages.slice(-6); // Reduced from 10 to save TPM
+      const recentMessages = messages.slice(-6);
       const aiMessages = [
         { role: "system", content: systemPrompt },
         ...recentMessages.map((m: any) => ({ role: m.role === "assistant" ? "assistant" : "user", content: m.content.includes("data:image") ? "[Image]" : m.content }))
@@ -303,7 +303,7 @@ export async function POST(req: Request) {
         messages: aiMessages,
         temperature: 0.5,
         maxTokens: 2000,
-        maxRetries: 3 // CLAUDE'S FIX: Auto-retry on 429 rate limits
+        maxRetries: 3
       });
 
       const encoder = new TextEncoder();
