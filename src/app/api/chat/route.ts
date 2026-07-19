@@ -11,6 +11,9 @@ const cerebras = createOpenAI({
   apiKey: process.env.CEREBRAS_API_KEY,
 });
 
+// Use environment variable for the model ID so deprecations don't break the code
+const AI_MODEL = process.env.AI_MODEL_ID || 'gpt-oss-120b';
+
 // Helper to truncate text
 function truncate(str: string | null, max: number) {
   if (!str) return null;
@@ -163,7 +166,7 @@ export async function POST(req: Request) {
               { role: "user", content: query }
             ];
             const result = await streamText({
-              model: cerebras('llama3.1-8b-1024'),
+              model: cerebras(AI_MODEL), // Uses environment variable
               messages: synthesizeMessages,
               temperature: 0.3,
               maxTokens: 1000,
@@ -214,7 +217,7 @@ export async function POST(req: Request) {
       const toolCallLog: any[] = [];
 
       const result = await streamText({
-        model: cerebras('llama3.1-8b-1024'),
+        model: cerebras(AI_MODEL), // Uses environment variable
         messages: [
           { role: "system", content: systemPrompt },
           ...recentMessages
@@ -315,7 +318,7 @@ export async function POST(req: Request) {
       ];
 
       const result = await streamText({
-        model: cerebras('llama3.1-8b-1024'),
+        model: cerebras(AI_MODEL), // Uses environment variable
         messages: aiMessages,
         temperature: 0.5,
         maxTokens: 2000,
