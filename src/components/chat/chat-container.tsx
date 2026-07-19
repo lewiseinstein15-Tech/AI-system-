@@ -142,10 +142,17 @@ export function ChatContainer() {
 
   const handleSelectConversation = async (id: string) => {
     setConversationId(id);
-    const res = await fetch(`/api/conversations/${id}`);
-    const data = await res.json();
-    setMessages(data.messages.map((m: any) => ({ role: m.role, content: m.content })));
-    setMobileSidebarOpen(false);
+    try {
+      const res = await fetch(`/api/conversations/${id}`);
+      const data = await res.json();
+      // CRASH FIX: Ensure data.messages is an array before mapping
+      if (data && Array.isArray(data.messages)) {
+        setMessages(data.messages.map((m: any) => ({ role: m.role, content: m.content })));
+      }
+      setMobileSidebarOpen(false);
+    } catch (e) {
+      console.error("Failed to load conversation");
+    }
   };
 
   if (status === "loading" || status === "unauthenticated") {
