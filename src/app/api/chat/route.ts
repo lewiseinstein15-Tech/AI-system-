@@ -269,7 +269,7 @@ export async function POST(req: Request) {
       return new Response(stream, { headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" } });
     }
 
-    // --- CODING: FAST 4-PHASE ---
+    // --- CODING: ONE SHOT + VERIFY ---
     const isCoding =
       lowerPrompt.includes("code") ||
       lowerPrompt.includes("algorithm") ||
@@ -284,137 +284,78 @@ export async function POST(req: Request) {
     if (isCoding) {
       const enc = new TextEncoder();
 
-      const REASON = `You are an elite software engineer. Analyze this coding problem concisely:
-- Inputs, outputs, constraints
-- State design (if sequence constraints: dp[i][last_move][consecutive_count])
-- Algorithm plan
-- Time/space complexity
-NO CODE. Just analysis.`;
+      const CODING_PROMPT = `You are an elite software engineer. The user asked a coding question.
 
-      const EXECUTE = `Write the JavaScript solution based on the analysis above.
-- Single named function
-- console.log test cases at bottom
-Output ONLY code block.`;
+Your response MUST have exactly 2 sections:
 
-      const CRITIC = `Review this code briefly. Does it implement the analysis? Are constraints enforced? Score 0-100. Output: "Score: X/100 - brief note"`;
+**SECTION 1: ANALYSIS**
+Briefly analyze:
+- What are the inputs, outputs, and constraints?
+- What algorithm will you use?
+- What is the time/space complexity?
+
+**SECTION 2: CODE**
+Write a complete JavaScript solution:
+- Use a single named function
+- Include 2-3 console.log test cases at the bottom
+- The code MUST be correct and handle all edge cases
+
+Format the code block like this:
+\`\`\`javascript
+function yourFunctionName(...) {
+  // your code
+}
+console.log(yourFunctionName(...));
+\`\`\`
+
+Be concise. Get straight to the point.`;
 
       const stream = new ReadableStream({
         async start(ctrl) {
-          let recent = messages.slice(-4).map((m: any) => ({
-            role: m.role === "assistant" ? "assistant" : "user",
-            content: m.content.includes("data:image") ? "[Image]" : m.content,
-          }));
-
           let full = "";
-          let lastCode = "";
-          let ok = false;
-          let rounds = 0;
-          const MAX_ROUNDS = 2;
 
           try {
-            for (let r = 1; r <= MAX_ROUNDS; r++) {
-              rounds = r;
+            // ONE AI call for analysis + code
+            const res = await callAI(
+              [
+                { role: "system", content: CODING_PROMPT },
+                ...messages.slice(-4).map((m: any) => ({
+                  role: m.role === "assistant" ? "assistant" : "user",
+                  content: m.content.includes("data:image") ? "[Image]" : m.content,
+                })),
+              ],
+              0.2,
+              1500
+            );
 
-              // REASON (fast, 400 tokens)
-              const rh = `\n🧠 **REASONING...**\n\n`;
-              ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: rh } }] })}\n\n`));
-              const reasonRes = await callAI([{ role: "system", content: REASON }, ...recent], 0.2, 400);
-              let reasonTxt = "";
-              for await (const d of reasonRes.textStream) {
-                reasonTxt += d;
-                ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: d } }] })}\n\n`));
-              }
-              full += rh + reasonTxt;
-
-              // EXECUTE (fast, 600 tokens)
-              const eh = `\n\n💻 **CODING...**\n\n`;
-              ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: eh } }] })}\n\n`));
-              const execRes = await callAI(
-                [{ role: "system", content: EXECUTE }, ...recent, { role: "assistant", content: reasonTxt }, { role: "user", content: "Write code." }],
-                0.1,
-                600
-              );
-              let execTxt = "";
-              for await (const d of execRes.textStream) {
-                execTxt += d;
-                ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: d } }] })}\n\n`));
-              }
-              full += eh + execTxt;
-
-              // CRITIC (fast, 200 tokens)
-              const ch = `\n\n🕵️ **CRITIQUING...**\n\n`;
-              ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: ch } }] })}\n\n`));
-              const criticRes = await callAI(
-                [{ role: "system", content: CRITIC }, ...recent, { role: "assistant", content: reasonTxt }, { role: "assistant", content: execTxt }, { role: "user", content: "Review." }],
-                0.2,
-                200
-              );
-              let criticTxt = "";
-              for await (const d of criticRes.textStream) {
-                criticTxt += d;
-                ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: d } }] })}\n\n`));
-              }
-              full += ch + criticTxt;
-
-              // VERIFY
-              const code = extractCode(execTxt);
-              if (!code) {
-                const msg = `\n\n⚠️ No code found. Retrying...\n`;
-                full += msg;
-                ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: msg } }] })}\n\n`));
-                continue;
-              }
-
-              const result = verifyCode(code);
-              if (result.ok) {
-                // Code runs! Show output. Don't auto-retry for wrong answers.
-                const outMsg = `\n\n🧪 **OUTPUT:** \`${result.out.trim()}\`\n`;
-                full += outMsg;
-                ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: outMsg } }] })}\n\n`));
-
-                const scoreMatch = criticTxt.match(/Score:\s*(\d+)/);
-                const score = scoreMatch ? parseInt(scoreMatch[1]) : 50;
-
-                if (score >= 70) {
-                  ok = true;
-                  const msg = `\n\n✅ **VERIFIED** — Code runs successfully.`;
-                  full += msg;
-                  ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: msg } }] })}\n\n`));
-                } else {
-                  const msg = `\n\n⚠️ **Code runs but may have issues** (Score: ${score}/100). Say "fix it" to retry.`;
-                  full += msg;
-                  ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: msg } }] })}\n\n`));
-                }
-                break; // STOP after Round 1 if code runs
-              }
-
-              // Code crashed — only retry on actual errors
-              const msg = `\n\n❌ **ERROR:** \`${result.err}\`\n🔄 Auto-fixing...\n`;
-              full += msg;
-              ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: msg } }] })}\n\n`));
-
-              if (code === lastCode) {
-                const stuck = `\n\n⚠️ Same error repeating. Stopping.`;
-                full += stuck;
-                ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: stuck } }] })}\n\n`));
-                break;
-              }
-              lastCode = code;
-              recent = [...recent, { role: "assistant", content: reasonTxt + "\n" + execTxt }, { role: "user", content: `Fix this error: ${result.err}` }];
+            for await (const d of res.textStream) {
+              full += d;
+              ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: d } }] })}\n\n`));
             }
 
-            if (!ok && rounds >= MAX_ROUNDS) {
-              const msg = `\n\n⚠️ Could not fix after ${rounds} tries. Try rephrasing your question.`;
+            // Extract and verify code
+            const code = extractCode(full);
+            if (code) {
+              const result = verifyCode(code);
+              if (result.ok) {
+                const msg = `\n\n✅ **CODE VERIFIED** — Output: \`${result.out.trim()}\``;
+                full += msg;
+                ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: msg } }] })}\n\n`));
+              } else {
+                const msg = `\n\n❌ **CODE ERROR:** \`${result.err}\`\n\nSay "fix it" and I'll rewrite the solution.`;
+                full += msg;
+                ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: msg } }] })}\n\n`));
+              }
+            } else {
+              const msg = `\n\n⚠️ No code block found in response.`;
               full += msg;
               ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: msg } }] })}\n\n`));
             }
           } catch (e: any) {
             console.error("Stream error:", e);
-            const msg = "\n\n*(System: Stream interrupted. Please try again.)*";
-            if (!full.includes(msg)) {
-              ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: msg } }] })}\n\n`));
-              full += msg;
-            }
+            const msg = "\n\n*(System: Error generating response. Please try again.)*";
+            ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: msg } }] })}\n\n`));
+            full += msg;
           } finally {
             ctrl.enqueue(enc.encode("data: [DONE]\n\n"));
             ctrl.close();
