@@ -89,18 +89,20 @@ const MAX_DEBUG_ROUNDS = 5;
 const SYSTEM_PROMPT = `You are the CS Hub AI, an expert coding assistant.
 MANDATORY DEBUGGING WORKFLOW:
 1. Write your first attempt at the solution.
-2. You MUST call the execute_code tool to actually run it.
-3. Read the REAL output/error. Do not guess.
-4. If there is an error, FIX the code and call execute_code again. Repeat until correct.
+2. You MUST invoke the execute_code tool to actually run it.
+3. Read the REAL output/error returned by the tool. Do not guess.
+4. If there is an error, FIX the code and invoke execute_code again. Repeat until correct.
+
 MANDATORY VERIFICATION:
-5. After passing execute_code, you MUST call stress_test_code for algorithmic problems. Write a simple brute-force solution and a random input generator.
+5. After passing execute_code, you MUST invoke the stress_test_code tool for algorithmic problems. 
 6. If stress_test_code reports mismatches, fix your algorithm and test again until 0 mismatches.
 7. Only after both tools pass should you give your final answer to the user. State what you verified.
 
-ABSOLUTE RULE ON VERIFICATION CLAIMS:
-- You must NEVER write prose claiming code was executed, tested, or verified unless you actually made a real execute_code or stress_test_code TOOL CALL.
-- Writing out a Python code block that CALLS stress_test_code as if it were a function in your own code is NOT the same as actually invoking the stress_test_code TOOL.
-- If you have not actually received a tool result confirming success, say plainly: "I have not yet verified this."`;
+ABSOLUTE RULE ON TOOL USAGE:
+- You CANNOT call tools by writing Python code like "stress_test_code(...)". That code will never run.
+- You MUST invoke the tool DIRECTLY using the native function calling mechanism (JSON format).
+- If you write a code block containing "stress_test_code(" or "execute_code(", you have failed.
+- You must NEVER write prose claiming code was executed or verified unless you actually invoked the tool directly and are looking at its real returned result.`;
 
 const TOOLS = [
   {
@@ -215,7 +217,6 @@ async function callGroq(messages: any[]) {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${process.env.GROQ_API_KEY}` },
       body: JSON.stringify({
-        // FIXED: Using llama-3.1-8b-instant which actually exists on Groq and supports tool calling
         model: "llama-3.1-8b-instant",
         messages,
         tools: TOOLS,
