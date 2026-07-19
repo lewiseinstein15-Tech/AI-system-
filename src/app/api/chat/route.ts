@@ -2,8 +2,7 @@ import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { createOpenAI } from '@ai-sdk/openai';
-import { streamText, tool } from 'ai';
-import { z } from 'zod';
+import { streamText } from 'ai';
 import vm from 'vm';
 
 // ============================================================
@@ -98,7 +97,7 @@ function executeJsSafely(code: string): { stdout: string; stderr: string } {
   return { stdout, stderr };
 }
 
-// --- CLAUDE'S BACKEND-ENFORCED VERIFICATION ---
+// --- BACKEND-ENFORCED VERIFICATION ---
 async function backendVerify(aiResponseText: string): Promise<string> {
   const codeMatches = [...aiResponseText.matchAll(/```javascript\n?([\s\S]*?)```/g)];
   if (codeMatches.length === 0) return ""; 
@@ -268,24 +267,18 @@ export async function POST(req: Request) {
       return new Response(searchStream, { headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' } });
     }
 
-    // --- AUTONOMOUS CODE PIPELINE ---
+    // --- AUTONOMOUS CODE PIPELINE (OPTIMIZED) ---
     const isCodingQuestion = lowerUserPrompt.includes("code") || lowerUserPrompt.includes("algorithm") || lowerUserPrompt.includes("trace") || lowerUserPrompt.includes("solve") || lowerUserPrompt.includes("string") || lowerUserPrompt.includes("array") || lowerUserPrompt.includes("tree") || lowerUserPrompt.includes("graph") || lowerUserPrompt.includes("dp");
 
     if (isCodingQuestion) {
-      const systemPrompt = `You are the CS Hub AI, an expert coding assistant.
-      MANDATORY DEBUGGING WORKFLOW:
-      1. Write your first attempt at the solution in JavaScript.
-      2. You MUST invoke the execute_code tool to actually run it.
-      3. Read the REAL output/error returned by the tool. Do not guess.
-      4. If there is an error, FIX the code and invoke execute_code again. Repeat until correct.
-      5. Only after the tool passes should you give your final answer to the user. State what you verified.
+      // REMOVED TOOL CALLING: The AI just writes the code, and the backend verifies it independently.
+      // This cuts API requests by 75% and eliminates rate limit timeouts.
+      const systemPrompt = `You are CS Hub AI, an expert coding assistant. 
+      When asked a coding question, write the solution in JavaScript inside a markdown block. 
+      Explain your approach and time/space complexity. 
+      Do NOT claim to have run or verified the code yourself; the backend system will automatically run and verify your code independently.`;
 
-      ABSOLUTE RULE ON TOOL USAGE:
-      - You CANNOT call tools by writing JavaScript code like "execute_code(...)". That code will never run.
-      - You MUST invoke the tool DIRECTLY using the native function calling mechanism (JSON format).
-      - You must NEVER write prose claiming code was executed or verified unless you actually invoked the tool directly and are looking at its real returned result.`;
-
-      const recentMessages = messages.slice(-2).map((m: any) => {
+      const recentMessages = messages.slice(-4).map((m: any) => {
         let safeContent = m.content;
         if (safeContent.includes("data:image")) safeContent = "[User attached an image.]";
         return { role: m.role === "assistant" ? "assistant" : "user", content: safeContent };
@@ -301,21 +294,8 @@ export async function POST(req: Request) {
             ...recentMessages
           ],
           temperature: 0.1,
-          maxSteps: 3,
-          maxTokens: 3000,
-          maxRetries: 1,
-          tools: {
-            execute_code: tool({
-              description: 'Executes JavaScript code locally and returns stdout and stderr.',
-              parameters: z.object({
-                code: z.string().describe('The complete JavaScript code to execute. Use console.log() to print output.'),
-              }),
-              execute: async ({ code }) => {
-                const { stdout, stderr } = executeJsSafely(code);
-                return { stdout, stderr };
-              }
-            })
-          }
+          maxTokens: 2000,
+          maxRetries: 2
         }));
         streamResult = result;
         usedProvider = providerName;
@@ -336,28 +316,13 @@ export async function POST(req: Request) {
           }, 5000);
 
           try {
-            for await (const part of streamResult.fullStream) {
-              if (part.type === 'text-delta') {
-                fullText += part.textDelta;
-                controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: part.textDelta } }] })}\n\n`));
-              } else if (part.type === 'tool-call') {
-                const toolMsg = "\n> ⏳ **Running code locally...**\n";
-                fullText += toolMsg;
-                controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: toolMsg } }] })}\n\n`));
-              } else if (part.type === 'tool-result') {
-                const result = part.result as any;
-                const stdout = result?.stdout || "";
-                const stderr = result?.stderr || "";
-                const outputMsg = `\n> \n> **Execution Output:**\n> \`\`\`\n> ${stdout || stderr}\n> \`\`\`\n> \n`;
-                if (stdout || stderr) {
-                  fullText += outputMsg;
-                  controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: outputMsg } }] })}\n\n`));
-                }
-              }
+            for await (const delta of streamResult.textStream) {
+              fullText += delta;
+              controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: delta } }] })}\n\n`));
             }
           } catch (streamError: any) {
             console.error(`Stream Interruption (provider: ${usedProvider}):`, streamError);
-            const errorMsg = "\n\n*(System: The AI stream was interrupted due to a rate limit or network timeout. Please try again.)*";
+            const errorMsg = "\n\n*(System: The AI stream was interrupted. Please try again.)*";
             if (!fullText.includes(errorMsg)) {
               controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: errorMsg } }] })}\n\n`));
               fullText += errorMsg;
@@ -365,7 +330,7 @@ export async function POST(req: Request) {
           } finally {
             clearInterval(heartbeat);
 
-            // CLAUDE'S BACKEND VERIFICATION
+            // BACKEND VERIFICATION: Run the code locally and append the real output
             const verificationMsg = await backendVerify(fullText);
             if (verificationMsg) {
               controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: verificationMsg } }] })}\n\n`));
@@ -399,7 +364,7 @@ export async function POST(req: Request) {
           messages: aiMessages,
           temperature: 0.5,
           maxTokens: 2000,
-          maxRetries: 1,
+          maxRetries: 2
         }));
         streamResult = result;
       } catch (fallbackError: any) {
