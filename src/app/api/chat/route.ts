@@ -1,353 +1,50 @@
-import { getServerSession } from "next-auth";
-import { authOptions } from "@/lib/auth";
-import { prisma } from "@/lib/prisma";
-import { groq } from '@ai-sdk/groq';
-import { streamText, tool } from 'ai';
-import { z } from 'zod';
-
-// Helper to truncate text
-function truncate(str: string | null, max: number) {
-  if (!str) return null;
-  return str.length > max ? str.substring(0, max) + "..." : str;
-}
-
-// Helper to fetch with a timeout
-async function fetchWithTimeout(url: string, options: any = {}, ms: number = 5000) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), ms);
-  try {
-    const res = await fetch(url, { ...options, signal: controller.signal });
-    clearTimeout(timeout);
-    return res;
-  } catch (e) {
-    clearTimeout(timeout);
-    throw e;
-  }
-}
-
-// --- MEGA SEARCH AGENT HELPERS ---
-async function searchWiki(query: string) {
-  const searchRes = await fetchWithTimeout(`https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(query)}&format=json&origin=*`);
-  const searchData = await searchRes.json();
-  if (searchData.query?.search?.length > 0) {
-    const title = searchData.query.search[0].title;
-    const sumRes = await fetchWithTimeout(`https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(title)}`);
-    const sumData = await sumRes.json();
-    if (sumData.extract) return `Wikipedia: ${sumData.extract}`;
-  }
-  return null;
-}
-
-async function searchDdg(query: string) {
-  const res = await fetchWithTimeout(`https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1&skip_disambig=1`);
-  const data = await res.json();
-  if (data.AbstractText) return `DuckDuckGo: ${data.AbstractText}`;
-  if (data.RelatedTopics?.[0]?.Text) return `DuckDuckGo: ${data.RelatedTopics[0].Text}`;
-  return null;
-}
-
-async function searchHn(query: string) {
-  const res = await fetchWithTimeout(`https://hn.algolia.com/api/v1/search?query=${encodeURIComponent(query)}&tags=story&hitsPerPage=2`);
-  const data = await res.json();
-  if (data.hits?.length > 0) return `Hacker News: ${data.hits.map((h: any) => h.title).join(' | ')}`;
-  return null;
-}
-
-async function searchSo(query: string) {
-  const res = await fetchWithTimeout(`https://api.stackexchange.com/2.3/search/advanced?order=desc&sort=relevance&q=${encodeURIComponent(query)}&site=stackoverflow&pagesize=2`);
-  const data = await res.json();
-  if (data.items?.length > 0) return `StackOverflow: ${data.items.map((i: any) => i.title).join(' | ')}`;
-  return null;
-}
-
-async function searchGh(query: string) {
-  const res = await fetchWithTimeout(`https://api.github.com/search/repositories?q=${encodeURIComponent(query)}&sort=stars&order=desc&per_page=2`);
-  const data = await res.json();
-  if (data.items?.length > 0) return `GitHub: ${data.items.map((i: any) => i.full_name).join(' | ')}`;
-  return null;
-}
-
-async function searchArxiv(query: string) {
-  const res = await fetchWithTimeout(`https://export.arxiv.org/api/query?search_query=all:${encodeURIComponent(query)}&max_results=2`);
-  const xmlText = await res.text();
-  const titles = [...xmlText.matchAll(/<title>(.*?)<\/title>/g)].map(m => m[1]).filter(t => t !== "arXiv Query Result");
-  if (titles.length > 0) return `arXiv Papers: ${titles.join(' | ')}`;
-  return null;
-}
-
-// --- CLAUDE'S HALLUCINATION CHECK ---
-const VERIFICATION_CLAIM_PATTERNS = [
-  /verified/i,
-  /passes? all( the)? tests?/i,
-  /tested against/i,
-  /ran (this|the) (code|solution)/i,
-  /confirmed (to be )?correct/i,
-  /0 mismatches/i,
-];
-
-function checkForUnverifiedClaims(finalAnswer: string, toolCalls: any[]): { flagged: boolean; note?: string } {
-  const claimsVerification = VERIFICATION_CLAIM_PATTERNS.some((re) => re.test(finalAnswer));
-  if (!claimsVerification) return { flagged: false };
-
-  const ranExecuteCode = toolCalls.some((c: any) => c.type === "execute_code");
-
-  if (!ranExecuteCode) {
-    return {
-      flagged: true,
-      note: "⚠️ **System Warning:** This response claims the code was tested/verified, but no execute_code tool was actually called in this session. Treat any 'verified' claim above with caution — it may be fabricated."
-    };
-  }
-
-  return { flagged: false };
-}
-
-export async function POST(req: Request) {
-  try {
-    const session = await getServerSession(authOptions);
-    if (!session) return new Response(JSON.stringify({ error: "Unauthorized" }), { status: 401 });
-
-    const { messages, conversationId } = await req.json();
-    const userPrompt = messages[messages.length - 1].content;
-
-    let currentConvId = conversationId;
-
-    if (!currentConvId) {
-      const newConversation = await prisma.conversation.create({
-        data: { userId: session.user.id, title: userPrompt.substring(0, 30) + "..." },
-      });
-      currentConvId = newConversation.id;
-    }
-    
-    await prisma.message.create({
-      data: { conversationId: currentConvId, role: "user", content: userPrompt },
-    });
-
-    const lowerUserPrompt = userPrompt.toLowerCase();
-    
-    // --- INSTANT SEARCH TRIGGER ---
-    const isSearchIntent = lowerUserPrompt.startsWith("search for") || lowerUserPrompt.includes("search the web") || lowerUserPrompt.startsWith("look up") || lowerUserPrompt.startsWith("search ");
-    
-    if (isSearchIntent) {
-      let query = userPrompt.replace(/(search for|search the web for|look up|search)/i, "").trim();
-      query = query.replace(/["']/g, "").trim();
-      
-      const encoder = new TextEncoder();
-      const searchStream = new ReadableStream({
-        async start(controller) {
-          const sendStep = (step: string) => controller.enqueue(encoder.encode(`data: ${JSON.stringify({ searchStep: step })}\n\n`));
-          sendStep("Wikipedia"); sendStep("DuckDuckGo"); sendStep("Hacker News"); sendStep("StackOverflow"); sendStep("GitHub"); sendStep("arXiv");
-          
-          const [wiki, ddg, hn, so, gh, arxiv] = await Promise.all([
-            searchWiki(query).catch(() => null), searchDdg(query).catch(() => null), searchHn(query).catch(() => null),
-            searchSo(query).catch(() => null), searchGh(query).catch(() => null), searchArxiv(query).catch(() => null)
-          ]);
-
-          let searchContext = "";
-          if (wiki) searchContext += `${truncate(wiki, 300)}\n\n`;
-          if (ddg) searchContext += `${truncate(ddg, 300)}\n\n`;
-          if (hn) searchContext += `${truncate(hn, 300)}\n\n`;
-          if (so) searchContext += `${truncate(so, 300)}\n\n`;
-          if (gh) searchContext += `${truncate(gh, 300)}\n\n`;
-          if (arxiv) searchContext += `${truncate(arxiv, 300)}\n\n`;
-
-          let aiText = "";
-          if (searchContext) {
-            const synthesizeMessages = [
-              { role: "system", content: `You searched 6 sources for "${query}". Results:\n\n${searchContext}\n\nSummarize and cite sources.` },
-              { role: "user", content: query }
-            ];
-            const result = await streamText({
-              model: groq('llama-3.1-8b-instant'),
-              messages: synthesizeMessages,
-              temperature: 0.3,
-              maxTokens: 1000,
-              maxRetries: 3
-            });
-            for await (const delta of result.textStream) {
-              controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: delta } }] })}\n\n`));
-              aiText += delta;
-            }
-          } else {
-            aiText = `I searched for "${query}", but couldn't find a direct answer.`;
-            controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: aiText } }] })}\n\n`));
-          }
-
-          controller.enqueue(encoder.encode('data: [DONE]\n\n'));
-          controller.close();
-
-          await prisma.message.create({ data: { conversationId: currentConvId, role: "assistant", content: aiText } });
-          await prisma.conversation.update({ where: { id: currentConvId }, data: { updatedAt: new Date() } });
-        }
-      });
-      return new Response(searchStream, { headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' } });
-    }
-
-    // --- AUTONOMOUS CODE PIPELINE ---
-    const isCodingQuestion = lowerUserPrompt.includes("code") || lowerUserPrompt.includes("algorithm") || lowerUserPrompt.includes("trace") || lowerUserPrompt.includes("solve") || lowerUserPrompt.includes("string") || lowerUserPrompt.includes("array") || lowerUserPrompt.includes("tree") || lowerUserPrompt.includes("graph") || lowerUserPrompt.includes("dp");
-    
-    if (isCodingQuestion) {
-      const systemPrompt = `You are the CS Hub AI, an expert coding assistant.
-      MANDATORY DEBUGGING WORKFLOW:
-      1. Write your first attempt at the solution.
-      2. You MUST invoke the execute_code tool to actually run it.
-      3. Read the REAL output/error returned by the tool. Do not guess.
-      4. If there is an error, FIX the code and invoke execute_code again. Repeat until correct.
-      5. Only after the tool passes should you give your final answer to the user. State what you verified.
-      
-      ABSOLUTE RULE ON TOOL USAGE:
-      - You CANNOT call tools by writing Python code like "execute_code(...)". That code will never run.
-      - You MUST invoke the tool DIRECTLY using the native function calling mechanism (JSON format).
-      - You must NEVER write prose claiming code was executed or verified unless you actually invoked the tool directly and are looking at its real returned result.`;
-
-      const recentMessages = messages.slice(-2).map((m: any) => {
-        let safeContent = m.content;
-        if (safeContent.includes("data:image")) safeContent = "[User attached an image.]";
-        return { role: m.role === "assistant" ? "assistant" : "user", content: safeContent };
-      });
-
-      const toolCallLog: any[] = [];
-
-      const result = await streamText({
-        model: groq('llama-3.1-8b-instant'),
-        messages: [
-          { role: "system", content: systemPrompt },
-          ...recentMessages
-        ],
-        temperature: 0.1,
-        maxSteps: 3, 
-        maxTokens: 3000, // Increased slightly to prevent cutoff
-        maxRetries: 3,
-        toolChoice: 'required', // CLAUDE'S FIX: Force the AI to call the tool natively instead of writing JSON text
-        tools: {
-          execute_code: tool({
-            description: 'Executes Python code and returns stdout, stderr, and exit code.',
-            parameters: z.object({
-              code: z.string().describe('The complete Python code to execute'),
-            }),
-            execute: async ({ code }) => {
-              try {
-                const pistonRes = await fetchWithTimeout("https://emkc.org/api/v2/piston/execute", {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({
-                    language: "python",
-                    version: "3.10.0",
-                    files: [{ name: "main.py", content: code }]
-                  })
-                }, 15000);
-
-                if (pistonRes.ok) {
-                  const pistonData = await pistonRes.json();
-                  const stdout = pistonData.run.output || "";
-                  const stderr = pistonData.run.stderr || "";
-                  toolCallLog.push({ type: "execute_code", result: { stdout, stderr } });
-                  return { stdout, stderr };
-                } else {
-                  toolCallLog.push({ type: "execute_code", result: { error: "Sandbox rate limited" } });
-                  return { stdout: "", stderr: "Sandbox rate limited or unavailable." };
-                }
-              } catch (e) {
-                toolCallLog.push({ type: "execute_code", result: { error: "Network error" } });
-                return { stdout: "", stderr: "Execution network error." };
-              }
-            }
-          })
-        }
-      });
-
-      // Stream the response to the UI
-      const encoder = new TextEncoder();
-      let fullText = "";
-      const customStream = new ReadableStream({
-        async start(controller) {
-          const heartbeat = setInterval(() => {
-            controller.enqueue(encoder.encode(`: heartbeat\n\n`));
-          }, 5000);
-
-          for await (const delta of result.textStream) {
-            fullText += delta;
-            controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: delta } }] })}\n\n`));
-          }
-
-          clearInterval(heartbeat);
-
-          // Run Claude's hallucination check before closing the stream
-          const verificationCheck = checkForUnverifiedClaims(fullText, toolCallLog);
-          if (verificationCheck.flagged) {
-            const warning = `\n\n${verificationCheck.note}`;
-            controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: warning } }] })}\n\n`));
-            fullText += warning;
-          }
-
-          controller.enqueue(encoder.encode('data: [DONE]\n\n'));
-          controller.close();
-
-          await prisma.message.create({ data: { conversationId: currentConvId, role: "assistant", content: fullText } });
-          await prisma.conversation.update({ where: { id: currentConvId }, data: { updatedAt: new Date() } });
-        }
-      });
-
-      return new Response(customStream, { headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' } });
-
-    } else {
-      // --- NORMAL AI CHAT ---
-      const systemPrompt = `You are CS Hub AI, created by Lewis Einstein. If asked who built you, say "I was built by Lewis Einstein." You have TOOLS. Output ONLY the command: 1. [ACTION:CREATE_FLASHCARD] Front: <text> | Back: <text> 2. [ACTION:SAVE_NOTE] Title: <text> | Content: <text> 3. [ACTION:CREATE_ASSIGNMENT] Title: <text> | Due: <YYYY-MM-DDTHH:MM:SS>`;
-      const recentMessages = messages.slice(-6);
-      const aiMessages = [
-        { role: "system", content: systemPrompt },
-        ...recentMessages.map((m: any) => ({ role: m.role === "assistant" ? "assistant" : "user", content: m.content.includes("data:image") ? "[Image]" : m.content }))
-      ];
-
-      const result = await streamText({
-        model: groq('llama-3.1-8b-instant'),
-        messages: aiMessages,
-        temperature: 0.5,
-        maxTokens: 2000,
-        maxRetries: 3
-      });
-
-      const encoder = new TextEncoder();
-      let fullText = "";
-      const customStream = new ReadableStream({
-        async start(controller) {
-          for await (const delta of result.textStream) {
-            fullText += delta;
-            controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: delta } }] })}\n\n`));
-          }
-          controller.enqueue(encoder.encode('data: [DONE]\n\n'));
-          controller.close();
-
-          // Check for agent tools
-          const lowerAiText = fullText.toLowerCase();
-          if (lowerAiText.includes("action:create_flashcard") || (lowerUserPrompt.includes("create") && lowerUserPrompt.includes("flashcard"))) {
-            const match = fullText.match(/Front:\s*(.*?)\s*\|\s*Back:\s*(.*)/i);
-            if (match) {
-              await prisma.flashcard.create({ data: { front: match[1].trim(), back: match[2].trim(), userId: session.user.id } });
-            }
-          } else if (lowerAiText.includes("action:save_note") || (lowerUserPrompt.includes("save") && lowerUserPrompt.includes("note"))) {
-            const match = fullText.match(/Title:\s*(.*?)\s*\|\s*Content:\s*(.*)/i);
-            if (match) {
-              await prisma.note.create({ data: { title: match[1].trim(), content: match[2].trim(), userId: session.user.id } });
-            }
-          } else if (lowerAiText.includes("action:create_assignment") || (lowerUserPrompt.includes("add") && lowerUserPrompt.includes("assignment"))) {
-            const match = fullText.match(/Title:\s*(.*?)\s*\|\s*Due:\s*(.*)/i);
-            if (match) {
-              const dueDate = new Date(match[2].trim());
-              if (!isNaN(dueDate.getTime())) {
-                await prisma.assignment.create({ data: { title: match[1].trim(), dueDate, userId: session.user.id } });
-              }
-            }
-          }
-
-          await prisma.message.create({ data: { conversationId: currentConvId, role: "assistant", content: fullText } });
-          await prisma.conversation.update({ where: { id: currentConvId }, data: { updatedAt: new Date() } });
-        }
-      });
-
-      return new Response(customStream, { headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' } });
-    }
-  } catch (error: any) {
-    console.error("Chat API Error:", error);
-    return new Response(JSON.stringify({ error: "Internal Server Error", details: error.message }), { status: 500 });
+{
+  "name": "cs-hub-ai",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
+    "postinstall": "prisma generate"
+  },
+  "dependencies": {
+    "@ai-sdk/groq": "^1.0.0",
+    "@ai-sdk/openai": "^1.0.0",
+    "@auth/prisma-adapter": "^1.0.0",
+    "@prisma/client": "^5.0.0",
+    "@radix-ui/react-avatar": "^1.0.0",
+    "@radix-ui/react-dialog": "^1.0.0",
+    "@radix-ui/react-dropdown-menu": "^2.0.0",
+    "@radix-ui/react-toast": "^1.0.0",
+    "ai": "^3.4.0",
+    "bcryptjs": "^2.4.3",
+    "class-variance-authority": "^0.7.0",
+    "clsx": "^2.0.0",
+    "lucide-react": "^0.300.0",
+    "next": "14.1.0",
+    "next-auth": "^4.24.0",
+    "next-themes": "^0.2.1",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "react-markdown": "^9.0.0",
+    "react-syntax-highlighter": "^15.5.0",
+    "remark-gfm": "^4.0.0",
+    "tailwind-merge": "^2.2.0",
+    "zod": "^3.22.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/react": "^18.2.0",
+    "@types/react-dom": "^18.2.0",
+    "@types/react-syntax-highlighter": "^15.5.0",
+    "autoprefixer": "^10.4.0",
+    "eslint": "^8.50.0",
+    "eslint-config-next": "14.1.0",
+    "postcss": "^8.4.0",
+    "prisma": "^5.0.0",
+    "tailwindcss": "^3.4.0",
+    "typescript": "^5.3.0"
   }
 }
