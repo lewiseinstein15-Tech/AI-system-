@@ -3,6 +3,7 @@ import { authOptions } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { createOpenAI } from "@ai-sdk/openai";
 import { streamText } from "ai";
+import { Sandbox } from "@vercel/sandbox";
 
 // ============================================================
 // PROVIDER FALLBACK
@@ -60,49 +61,47 @@ async function fetchTimeout(url: string, opts: any = {}, ms = 5000) {
 }
 
 // ============================================================
-// CODE EXECUTION — via Piston (external sandbox), NOT node:vm.
+// CODE EXECUTION — via Vercel Sandbox (Firecracker microVM),
+// authenticated via access token since this app runs on Render,
+// not Vercel. Replaces the previous Piston-based implementation.
 //
-// node:vm is explicitly documented by Node.js as "not a security
-// mechanism — do not use it to run untrusted code," and has a
-// well-known one-line escape that grants access to process.env
-// (your API keys) and the filesystem. AI-generated code, run on
-// your own server, IS untrusted code from a security standpoint —
-// a crafted prompt could induce the model to emit an escape
-// payload. Piston runs code in an isolated external service
-// instead, so a malicious payload can't reach your credentials
-// even if it tries.
-//
-// Piston can be rate-limited or briefly unavailable — that's an
-// availability tradeoff, not a security one. This function
-// degrades gracefully instead of crashing the whole request.
+// NOTE: this was written from the official @vercel/sandbox docs
+// but has not been personally execution-verified against a live
+// Render deployment. Treat the first real run as the actual test.
 // ============================================================
 
 async function executeJs(code: string): Promise<{ ok: boolean; stdout: string; stderr: string; unavailable?: boolean }> {
+  let sandbox;
   try {
-    const res = await fetchTimeout(
-      "https://emkc.org/api/v2/piston/execute",
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          language: "javascript",
-          version: "18.15.0",
-          files: [{ name: "main.js", content: code }],
-        }),
-      },
-      15000
-    );
+    sandbox = await Sandbox.create({
+      token: process.env.VERCEL_TOKEN,
+      teamId: process.env.VERCEL_TEAM_ID,
+      projectId: process.env.VERCEL_PROJECT_ID,
+      timeout: 15000,
+      runtime: "node22",
+    });
 
-    if (!res.ok) {
-      return { ok: false, stdout: "", stderr: "Sandbox unavailable or rate-limited.", unavailable: true };
-    }
+    await sandbox.writeFiles([
+      { path: "main.js", content: Buffer.from(code) },
+    ]);
 
-    const data = await res.json();
-    const stdout = (data.run?.output || "").trim();
-    const stderr = (data.run?.stderr || "").trim();
-    return { ok: stderr.length === 0, stdout, stderr };
+    const result = await sandbox.runCommand({
+      cmd: "node",
+      args: ["main.js"],
+    });
+
+    const stdout = (await result.stdout()).trim();
+    const stderr = (await result.stderr()).trim();
+
+    return { ok: result.exitCode === 0, stdout, stderr };
   } catch (e: any) {
-    return { ok: false, stdout: "", stderr: `Network error: ${e.message}`, unavailable: true };
+    return { ok: false, stdout: "", stderr: `Sandbox error: ${e.message}`, unavailable: true };
+  } finally {
+    if (sandbox) {
+      try {
+        await sandbox.stop();
+      } catch {}
+    }
   }
 }
 
@@ -292,7 +291,7 @@ export async function POST(req: Request) {
       return new Response(stream, { headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" } });
     }
 
-    // --- CODING: generate, then independently verify via Piston ---
+    // --- CODING: generate, then independently verify via Vercel Sandbox ---
     const isCoding =
       lowerPrompt.includes("code") ||
       lowerPrompt.includes("algorithm") ||
