@@ -4,6 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { createOpenAI } from '@ai-sdk/openai';
 import { streamText, tool } from 'ai';
 import { z } from 'zod';
+import vm from 'vm';
 
 // ============================================================
 // MULTI-PROVIDER FALLBACK
@@ -74,79 +75,59 @@ async function fetchWithTimeout(url: string, options: any = {}, ms: number = 500
   }
 }
 
-// --- RESILIENT PISTON SANDBOX (WITH RETRIES) ---
-const PISTON_API_URL = "https://emkc.org/api/v2/piston/execute";
-async function runPistonWithRetries(language: string, version: string, code: string, stdin: string = "", retries = 3) {
-  for (let i = 0; i < retries; i++) {
-    try {
-      const res = await fetchWithTimeout(PISTON_API_URL, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ language, version, files: [{ content: code }], stdin }),
-      }, 15000);
-
-      // If Piston is rate-limiting us (429) or having a server error (5xx), wait and retry
-      if (res.status === 429 || res.status >= 500) {
-        console.warn(`Piston returned ${res.status}, retrying in ${i+1}s...`);
-        await new Promise(r => setTimeout(r, 1000 * (i + 1)));
-        continue;
-      }
-      
-      if (!res.ok) throw new Error(`Sandbox failed with status ${res.status}`);
-      
-      const data = await res.json();
-      return data.run || {};
-    } catch (e: any) {
-      if (i === retries - 1) throw e; // Throw on last attempt
-      console.warn(`Piston request failed (${e.message}), retrying...`);
-      await new Promise(r => setTimeout(r, 1000 * (i + 1)));
-    }
+// --- LOCAL JAVASCRIPT EXECUTION ENGINE ---
+function executeJsSafely(code: string): { stdout: string; stderr: string } {
+  let stdout = "";
+  let stderr = "";
+  try {
+    const sandbox = {
+      console: {
+        log: (...args: any[]) => { stdout += args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ') + '\n'; }
+      },
+      Math: Math,
+      Date: Date,
+      JSON: JSON
+    };
+    
+    const context = vm.createContext(sandbox);
+    // Run with a 3-second timeout to prevent infinite loops
+    vm.runInContext(code, context, { timeout: 3000 });
+  } catch (e: any) {
+    stderr = e.message || "Execution error";
   }
-  throw new Error("Sandbox failed after multiple retries");
+  return { stdout, stderr };
 }
 
 // --- CLAUDE'S BACKEND-ENFORCED VERIFICATION ---
 async function backendVerify(aiResponseText: string): Promise<string> {
-  const codeMatches = [...aiResponseText.matchAll(/```python\n?([\s\S]*?)```/g)];
+  const codeMatches = [...aiResponseText.matchAll(/```javascript\n?([\s\S]*?)```/g)];
   if (codeMatches.length === 0) return ""; 
 
   const finalCode = codeMatches[codeMatches.length - 1][1].trim();
-  const funcMatch = finalCode.match(/def\s+(\w+)\s*\(/);
-
+  const funcMatch = finalCode.match(/function\s+(\w+)\s*\(/);
   if (!funcMatch) {
-    try {
-      const run = await runPistonWithRetries("python", "3.10.0", finalCode);
-      const stdout = run.stdout || "";
-      const stderr = run.stderr || "";
-      return `\n\n✅ **Backend-verified output** (independently re-run by the server, not self-reported by the AI):\n\`\`\`\n${stdout || stderr}\n\`\`\``;
-    } catch (e: any) {
-      return `\n\n⚠️ **Backend Verification Failed** (Sandbox unavailable: ${e.message}).`;
-    }
+    const { stdout, stderr } = executeJsSafely(finalCode);
+    return `\n\n✅ **Backend-verified output** (independently re-run by the server):\n\`\`\`\n${stdout || stderr}\n\`\`\``;
   }
 
   const funcName = funcMatch[1];
   const testHarness = `
  ${finalCode}
 
-results = []
-for n in range(0, 16):
-    try:
-        results.append(${funcName}(n))
-    except Exception as e:
-        results.append(f"Error:{e}")
-print(results)
+const results = [];
+for (let n = 0; n < 16; n++) {
+  try {
+    results.push(${funcName}(n));
+  } catch (e) {
+    results.push("Error:" + e.message);
+  }
+}
+console.log(results);
 `;
 
-  try {
-    const run = await runPistonWithRetries("python", "3.10.0", testHarness);
-    const stdout = run.stdout?.trim();
-    const stderr = run.stderr?.trim();
-
-    if (stderr) return `\n\n⚠️ **Backend re-execution found an error the model missed:**\n\`\`\`\n${stderr}\n\`\`\``;
-    return `\n\n✅ **Backend-verified output** (independently re-run by the server for n=0 to 15, not self-reported by the AI):\n\`\`\`\n${stdout}\n\`\`\``;
-  } catch (e: any) {
-    return `\n\n⚠️ **Backend Verification Failed** (Sandbox unavailable: ${e.message}).`;
-  }
+  const { stdout, stderr } = executeJsSafely(testHarness);
+  if (stderr) return `\n\n⚠️ **Backend re-execution found an error the model missed:**\n\`\`\`\n${stderr}\n\`\`\``;
+  return `\n\n✅ **Backend-verified output** (independently re-run by the server for n=0 to 15, not self-reported by the AI):\n\`\`\`\n${stdout}\n\`\`\``;
 }
 
 // --- MEGA SEARCH AGENT HELPERS ---
@@ -293,14 +274,14 @@ export async function POST(req: Request) {
     if (isCodingQuestion) {
       const systemPrompt = `You are the CS Hub AI, an expert coding assistant.
       MANDATORY DEBUGGING WORKFLOW:
-      1. Write your first attempt at the solution.
+      1. Write your first attempt at the solution in JavaScript.
       2. You MUST invoke the execute_code tool to actually run it.
       3. Read the REAL output/error returned by the tool. Do not guess.
       4. If there is an error, FIX the code and invoke execute_code again. Repeat until correct.
       5. Only after the tool passes should you give your final answer to the user. State what you verified.
 
       ABSOLUTE RULE ON TOOL USAGE:
-      - You CANNOT call tools by writing Python code like "execute_code(...)". That code will never run.
+      - You CANNOT call tools by writing JavaScript code like "execute_code(...)". That code will never run.
       - You MUST invoke the tool DIRECTLY using the native function calling mechanism (JSON format).
       - You must NEVER write prose claiming code was executed or verified unless you actually invoked the tool directly and are looking at its real returned result.`;
 
@@ -325,19 +306,13 @@ export async function POST(req: Request) {
           maxRetries: 1,
           tools: {
             execute_code: tool({
-              description: 'Executes Python code and returns stdout, stderr, and exit code.',
+              description: 'Executes JavaScript code locally and returns stdout and stderr.',
               parameters: z.object({
-                code: z.string().describe('The complete Python code to execute'),
+                code: z.string().describe('The complete JavaScript code to execute. Use console.log() to print output.'),
               }),
               execute: async ({ code }) => {
-                try {
-                  const run = await runPistonWithRetries("python", "3.10.0", code);
-                  const stdout = run.output || "";
-                  const stderr = run.stderr || "";
-                  return { stdout, stderr };
-                } catch (e: any) {
-                  return { stdout: "", stderr: `Execution failed: ${e.message}` };
-                }
+                const { stdout, stderr } = executeJsSafely(code);
+                return { stdout, stderr };
               }
             })
           }
@@ -361,20 +336,19 @@ export async function POST(req: Request) {
           }, 5000);
 
           try {
-            // FIX: Use fullStream to catch tool calls AND display real sandbox output to the UI
             for await (const part of streamResult.fullStream) {
               if (part.type === 'text-delta') {
                 fullText += part.textDelta;
                 controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: part.textDelta } }] })}\n\n`));
               } else if (part.type === 'tool-call') {
-                const toolMsg = "\n> ⏳ **Running code in sandbox...**\n";
+                const toolMsg = "\n> ⏳ **Running code locally...**\n";
                 fullText += toolMsg;
                 controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: toolMsg } }] })}\n\n`));
               } else if (part.type === 'tool-result') {
                 const result = part.result as any;
                 const stdout = result?.stdout || "";
                 const stderr = result?.stderr || "";
-                const outputMsg = `\n> \n> **Sandbox Output:**\n> \`\`\`\n> ${stdout || stderr}\n> \`\`\`\n> \n`;
+                const outputMsg = `\n> \n> **Execution Output:**\n> \`\`\`\n> ${stdout || stderr}\n> \`\`\`\n> \n`;
                 if (stdout || stderr) {
                   fullText += outputMsg;
                   controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: outputMsg } }] })}\n\n`));
