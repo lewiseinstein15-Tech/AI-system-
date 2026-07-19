@@ -52,10 +52,6 @@ async function fetchTimeout(url: string, opts: any = {}, ms = 5000) {
     return await fetch(url, { ...opts, signal: ctrl.signal });
   } finally {
     clearTimeout(t);
-  try {
-    return await fetch(url, { ...opts, signal: ctrl.signal });
-  } finally {
-    clearTimeout(t);
   }
 }
 
@@ -290,21 +286,26 @@ export async function POST(req: Request) {
 
       const CODING_PROMPT = `You are an elite software engineer. The user asked a coding question.
 
+CRITICAL RULES:
+- Do NOT output any [ACTION:...] commands
+- Do NOT create flashcards, notes, or assignments
+- Do NOT mention saving things to dashboard
+- ONLY write analysis and code
+
 Your response MUST have exactly 2 sections:
 
 **SECTION 1: ANALYSIS**
 Briefly analyze:
-- What are the inputs, outputs, and constraints?
-- What algorithm will you use?
-- What is the time/space complexity?
+- Inputs, outputs, constraints
+- Algorithm choice
+- Time/space complexity
 
 **SECTION 2: CODE**
 Write a complete JavaScript solution:
-- Use a single named function
-- Include 2-3 console.log test cases at the bottom
-- The code MUST be correct and handle all edge cases
+- Single named function
+- 2-3 console.log test cases at bottom
 
-Format the code block like this:
+Format:
 \`\`\`javascript
 function yourFunctionName(...) {
   // your code
@@ -312,7 +313,7 @@ function yourFunctionName(...) {
 console.log(yourFunctionName(...));
 \`\`\`
 
-Be concise. Get straight to the point.`;
+Be concise. No extra text after the code block.`;
 
       const stream = new ReadableStream({
         async start(ctrl) {
