@@ -298,10 +298,14 @@ Output ONLY analysis. NO code.`;
 - Include console.log test cases at bottom
 Output ONLY the code block.`;
 
-      const CRITIC = `You are a strict code reviewer. Analyze code vs analysis.
-- Does code implement the described state design?
-- Are ALL constraints enforced?
-Score 0-100. Output ONLY score + brief critique.`;
+      const CRITIC = `You are a strict code reviewer. You MUST:
+1. Trace through the code mentally with the FIRST test case provided in the console.log statements
+2. Compare what the code outputs vs what it SHOULD output
+3. Check if ALL constraints from the problem are actually enforced in the code (not just mentioned in analysis)
+4. If the code would produce the wrong answer, say EXACTLY what the wrong output is and what the correct output should be
+
+Score 0-100. If the code produces wrong answers, score MUST be below 40.
+Output ONLY: "Score: X/100" followed by your critique.`;
 
       const stream = new ReadableStream({
         async start(ctrl) {
@@ -371,16 +375,47 @@ Score 0-100. Output ONLY score + brief critique.`;
 
               const result = verifyCode(code);
               if (result.ok) {
-                ok = true;
-                const msg = `\n\n✅ **BACKEND-VERIFIED** — Round ${r} success. Output: \`${result.out.trim()}\``;
+                // TEST: Verify the output is actually correct by running again
+                const testHeader = `\n\n🧪 **TESTING OUTPUT...**\n\n`;
+                ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: testHeader } }] })}\n\n`));
+                full += testHeader;
+
+                // Extract expected outputs from the code's console.log comments
+                const outputLines = result.out.trim().split("\n").filter((l: string) => l.trim());
+                const hasOutput = outputLines.length > 0;
+
+                if (hasOutput) {
+                  const outMsg = `Output: ${outputLines.join(", ")}\n`;
+                  full += outMsg;
+                  ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: outMsg } }] })}\n\n`));
+
+                  // Check if critic mentioned wrong answer
+                  const criticLower = criticTxt.toLowerCase();
+                  const mentionsWrong = criticLower.includes("wrong") || criticLower.includes("incorrect") || criticLower.includes("should be") || criticLower.includes("expected");
+                  const scoreMatch = criticTxt.match(/Score:\s*(\d+)/);
+                  const score = scoreMatch ? parseInt(scoreMatch[1]) : 50;
+
+                  if (!mentionsWrong && score >= 60) {
+                    ok = true;
+                    const msg = `\n\n✅ **BACKEND-VERIFIED** — Round ${r} success. Output: \`${result.out.trim()}\``;
+                    full += msg;
+                    ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: msg } }] })}\n\n`));
+                    break;
+                  } else {
+                    const msg = `\n\n⚠️ **CRITIC FLAGGED ISSUES** — Score: ${score}/100. Re-analyzing...\n`;
+                    full += msg;
+                    ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: msg } }] })}\n\n`));
+                  }
+                } else {
+                  const msg = `\n\n⚠️ **NO OUTPUT** — Code ran but produced nothing.\n`;
+                  full += msg;
+                  ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: msg } }] })}\n\n`));
+                }
+              } else {
+                const msg = `\n\n❌ **VERIFICATION FAILED:** \`${result.err}\`\n🔄 Re-analyzing...\n`;
                 full += msg;
                 ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: msg } }] })}\n\n`));
-                break;
               }
-
-              const msg = `\n\n❌ **VERIFICATION FAILED:** \`${result.err}\`\n🔄 Re-analyzing...\n`;
-              full += msg;
-              ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: msg } }] })}\n\n`));
 
               if (code === lastCode) {
                 const stuck = `\n\n⚠️ **Stop condition:** Identical code. Halting.`;
@@ -389,7 +424,7 @@ Score 0-100. Output ONLY score + brief critique.`;
                 break;
               }
               lastCode = code;
-              recent = [...recent, { role: "assistant", content: reasonTxt + "\n" + execTxt }, { role: "user", content: `Your code failed:\n\n${result.err}\n\nFix it.` }];
+              recent = [...recent, { role: "assistant", content: reasonTxt + "\n" + execTxt }, { role: "user", content: `Your code failed or was flagged by critic:\n\n${criticTxt}\n\nFix it.` }];
             }
 
             if (!ok) {
