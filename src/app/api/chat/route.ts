@@ -97,10 +97,10 @@ function executeJsSafely(code: string): { stdout: string; stderr: string } {
 }
 
 // ============================================================
-// ACT STATE MACHINE (ANALYZE → PLAN → EXECUTE → VERIFY)
+// ACT STATE MACHINE (REASON → EXECUTE → VERIFY)
 // ============================================================
 
-const MAX_ACT_ROUNDS = 2; // 2 rounds × 3 states = 6 API calls max
+const MAX_ACT_ROUNDS = 2;
 
 function extractJsCode(text: string): string | null {
   const match = text.match(/```javascript\s*([\s\S]*?)```/) || text.match(/```\s*([\s\S]*?)```/);
@@ -113,7 +113,7 @@ function extractFunctionName(code: string): string | null {
 }
 
 function backendExecute(code: string, funcName: string): { ok: boolean; stdout: string; stderr: string } {
-  const testInput = `"a1b2c3"`;
+  const testInput = `5`; // Test with a standard integer input
   const harness = `${code}\n\nconsole.log(${funcName}(${testInput}));`;
   try {
     const { stdout, stderr } = executeJsSafely(harness);
@@ -123,7 +123,7 @@ function backendExecute(code: string, funcName: string): { ok: boolean; stdout: 
   }
 }
 
-// Stream a single AI state (ANALYZE, PLAN, or EXECUTE)
+// Stream a single AI state
 async function streamAIState(
   systemPrompt: string,
   messages: any[],
@@ -136,7 +136,7 @@ async function streamAIState(
     messages: [{ role: "system", content: systemPrompt }, ...messages],
     temperature,
     maxTokens: 2000,
-    maxRetries: 1,
+    maxRetries: 3, // Increased to handle rate limits
   }));
 
   let text = "";
@@ -266,7 +266,7 @@ export async function POST(req: Request) {
                 messages: synthesizeMessages,
                 temperature: 0.3,
                 maxTokens: 1000,
-                maxRetries: 1, 
+                maxRetries: 3, 
               }));
 
               for await (const delta of result.textStream) {
@@ -302,23 +302,16 @@ export async function POST(req: Request) {
         return { role: m.role === "assistant" ? "assistant" : "user", content: safeContent };
       });
 
-      // ACT Prompt Templates
-      const ANALYZE_PROMPT = `You are an expert software engineer analyzing a coding problem.
+      // ACT Prompt Templates (Merged Analyze+Plan to save API calls)
+      const REASON_PROMPT = `You are an expert software engineer analyzing a coding problem.
 Break down the problem concisely:
-- What are the exact inputs and outputs?
-- What are the constraints and edge cases?
+- What are the exact inputs, outputs, and constraints?
 - What are the common pitfalls for this type of problem?
-- What algorithmic approach is best suited?
-Be specific and concise.`;
-
-      const PLAN_PROMPT = `Based on your analysis, create a concise implementation plan:
-- What data structures will you use?
-- What is the step-by-step algorithm?
-- How will you handle each edge case?
+- What is the step-by-step algorithmic plan?
 - What is the time and space complexity?
-Be specific and concise.`;
+DO NOT write any code in this stage. Only provide analysis and a plan.`;
 
-      const EXECUTE_PROMPT = `Based on your plan, write the JavaScript solution.
+      const EXECUTE_PROMPT = `Based on your analysis and plan, write the JavaScript solution.
 - Wrap your solution in a single named function.
 - Use console.log() for any test output.
 - Do NOT write a verification section.
@@ -341,25 +334,16 @@ Be specific and concise.`;
             for (let round = 1; round <= MAX_ACT_ROUNDS; round++) {
               roundsUsed = round;
 
-              // ── STATE 1: ANALYZE ──
-              const analyzeHeader = `\n🔍 **ANALYZING (Round ${round})...**\n\n`;
-              fullText += analyzeHeader;
-              controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: analyzeHeader } }] })}\n\n`));
+              // ── STATE 1: REASON (ANALYZE + PLAN) ──
+              const reasonHeader = `\n🧠 **REASONING (Round ${round})...**\n\n`;
+              fullText += reasonHeader;
+              controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: reasonHeader } }] })}\n\n`));
 
-              const analyzeText = await streamAIState(ANALYZE_PROMPT, conversationHistory, 0.2, controller, encoder);
-              conversationHistory.push({ role: "assistant", content: analyzeText });
-              fullText += analyzeText;
+              const reasonText = await streamAIState(REASON_PROMPT, conversationHistory, 0.2, controller, encoder);
+              conversationHistory.push({ role: "assistant", content: reasonText });
+              fullText += reasonText;
 
-              // ── STATE 2: PLAN ──
-              const planHeader = `\n\n📋 **PLANNING...**\n\n`;
-              fullText += planHeader;
-              controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: planHeader } }] })}\n\n`));
-
-              const planText = await streamAIState(PLAN_PROMPT, conversationHistory, 0.3, controller, encoder);
-              conversationHistory.push({ role: "assistant", content: planText });
-              fullText += planText;
-
-              // ── STATE 3: EXECUTE ──
+              // ── STATE 2: EXECUTE ──
               const executeHeader = `\n\n💻 **CODING...**\n\n`;
               fullText += executeHeader;
               controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: executeHeader } }] })}\n\n`));
@@ -368,7 +352,7 @@ Be specific and concise.`;
               conversationHistory.push({ role: "assistant", content: executeText });
               fullText += executeText;
 
-              // ── STATE 4: VERIFY ──
+              // ── STATE 3: VERIFY ──
               const code = extractJsCode(executeText);
               if (!code) {
                 const noCodeMsg = `\n\n⚠️ No code block found. Retrying...\n`;
@@ -397,7 +381,7 @@ Be specific and concise.`;
                 break;
               }
 
-              // Verification failed — feed REAL error back and loop to ANALYZE
+              // Verification failed — feed REAL error back and loop to REASON
               const failMsg = `\n\n❌ **VERIFICATION FAILED:** \`${execResult.stderr}\`\n🔄 Re-analyzing the problem...\n`;
               fullText += failMsg;
               controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: failMsg } }] })}\n\n`));
@@ -413,7 +397,7 @@ Be specific and concise.`;
 
               conversationHistory.push({
                 role: "user",
-                content: `Your code failed with this REAL error:\n\n${execResult.stderr}\n\nGo back to ANALYZE: What went wrong? What assumption was incorrect? What edge case did you miss?`
+                content: `Your code failed with this REAL error:\n\n${execResult.stderr}\n\nGo back to REASONING: What went wrong? What assumption was incorrect? What edge case did you miss?`
               });
             }
 
@@ -459,7 +443,7 @@ Be specific and concise.`;
           messages: aiMessages,
           temperature: 0.5,
           maxTokens: 2000,
-          maxRetries: 2
+          maxRetries: 3
         }));
         streamResult = result;
       } catch (fallbackError: any) {
