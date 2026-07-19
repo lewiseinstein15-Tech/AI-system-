@@ -163,7 +163,7 @@ export async function POST(req: Request) {
               { role: "user", content: query }
             ];
             const result = await streamText({
-              model: cerebras('llama3.1-8b'),
+              model: cerebras('llama3.1-8b-1024'),
               messages: synthesizeMessages,
               temperature: 0.3,
               maxTokens: 1000,
@@ -214,7 +214,7 @@ export async function POST(req: Request) {
       const toolCallLog: any[] = [];
 
       const result = await streamText({
-        model: cerebras('llama3.1-8b'),
+        model: cerebras('llama3.1-8b-1024'),
         messages: [
           { role: "system", content: systemPrompt },
           ...recentMessages
@@ -315,7 +315,7 @@ export async function POST(req: Request) {
       ];
 
       const result = await streamText({
-        model: cerebras('llama3.1-8b'),
+        model: cerebras('llama3.1-8b-1024'),
         messages: aiMessages,
         temperature: 0.5,
         maxTokens: 2000,
