@@ -5,14 +5,58 @@ import { createOpenAI } from '@ai-sdk/openai';
 import { streamText, tool } from 'ai';
 import { z } from 'zod';
 
-// Initialize Cerebras (OpenAI-compatible)
-const cerebras = createOpenAI({
-  baseURL: 'https://api.cerebras.ai/v1',
-  apiKey: process.env.CEREBRAS_API_KEY,
-});
+// ============================================================
+// MULTI-PROVIDER FALLBACK
+// Tries each free provider in order. If one fails at request
+// start (rate limit, quota exhausted, payment_required, model
+// not found), it moves to the next automatically.
+// ============================================================
 
-// Use environment variable for the model ID so deprecations don't break the code
-const AI_MODEL = process.env.AI_MODEL_ID || 'gpt-oss-120b';
+type ProviderConfig = {
+  name: string;
+  baseURL: string;
+  apiKeyEnv: string;
+  model: string;
+};
+
+const PROVIDERS: ProviderConfig[] = [
+  { name: "Cerebras", baseURL: "https://api.cerebras.ai/v1", apiKeyEnv: "CEREBRAS_API_KEY", model: process.env.CEREBRAS_MODEL_ID || "gpt-oss-120b" },
+  { name: "Groq", baseURL: "https://api.groq.com/openai/v1", apiKeyEnv: "GROQ_API_KEY", model: process.env.GROQ_MODEL_ID || "openai/gpt-oss-20b" },
+  { name: "OpenRouter", baseURL: "https://openrouter.ai/api/v1", apiKeyEnv: "OPENROUTER_API_KEY", model: process.env.OPENROUTER_MODEL_ID || "deepseek/deepseek-chat-v3:free" },
+  { name: "Gemini", baseURL: "https://generativelanguage.googleapis.com/v1beta/openai", apiKeyEnv: "GEMINI_API_KEY", model: process.env.GEMINI_MODEL_ID || "gemini-2.5-flash" },
+];
+
+// Attempts each provider in order until one successfully starts streaming.
+async function streamWithFallback(
+  buildArgs: (model: any) => Parameters<typeof streamText>[0]
+): Promise<{ result: Awaited<ReturnType<typeof streamText>>; providerName: string }> {
+  let lastError: any = null;
+
+  for (const provider of PROVIDERS) {
+    const apiKey = process.env[provider.apiKeyEnv];
+    if (!apiKey) {
+      console.warn(`Skipping ${provider.name}: ${provider.apiKeyEnv} not set`);
+      continue;
+    }
+
+    try {
+      const client = createOpenAI({ baseURL: provider.baseURL, apiKey });
+      const model = client(provider.model);
+      const args = buildArgs(model);
+      const result = await streamText(args);
+      console.log(`Using provider: ${provider.name} (${provider.model})`);
+      return { result, providerName: provider.name };
+    } catch (err: any) {
+      console.error(`Provider ${provider.name} failed:`, err?.message || err);
+      lastError = err;
+      continue;
+    }
+  }
+
+  throw new Error(
+    `All providers exhausted. Last error: ${lastError?.message || "unknown"}`
+  );
+}
 
 // Helper to truncate text
 function truncate(str: string | null, max: number) {
@@ -126,26 +170,26 @@ export async function POST(req: Request) {
       });
       currentConvId = newConversation.id;
     }
-    
+
     await prisma.message.create({
       data: { conversationId: currentConvId, role: "user", content: userPrompt },
     });
 
     const lowerUserPrompt = userPrompt.toLowerCase();
-    
+
     // --- INSTANT SEARCH TRIGGER ---
     const isSearchIntent = lowerUserPrompt.startsWith("search for") || lowerUserPrompt.includes("search the web") || lowerUserPrompt.startsWith("look up") || lowerUserPrompt.startsWith("search ");
-    
+
     if (isSearchIntent) {
       let query = userPrompt.replace(/(search for|search the web for|look up|search)/i, "").trim();
       query = query.replace(/["']/g, "").trim();
-      
+
       const encoder = new TextEncoder();
       const searchStream = new ReadableStream({
         async start(controller) {
           const sendStep = (step: string) => controller.enqueue(encoder.encode(`data: ${JSON.stringify({ searchStep: step })}\n\n`));
           sendStep("Wikipedia"); sendStep("DuckDuckGo"); sendStep("Hacker News"); sendStep("StackOverflow"); sendStep("GitHub"); sendStep("arXiv");
-          
+
           const [wiki, ddg, hn, so, gh, arxiv] = await Promise.all([
             searchWiki(query).catch(() => null), searchDdg(query).catch(() => null), searchHn(query).catch(() => null),
             searchSo(query).catch(() => null), searchGh(query).catch(() => null), searchArxiv(query).catch(() => null)
@@ -165,16 +209,23 @@ export async function POST(req: Request) {
               { role: "system", content: `You searched 6 sources for "${query}". Results:\n\n${searchContext}\n\nSummarize and cite sources.` },
               { role: "user", content: query }
             ];
-            const result = await streamText({
-              model: cerebras(AI_MODEL), // Uses environment variable
-              messages: synthesizeMessages,
-              temperature: 0.3,
-              maxTokens: 1000,
-              maxRetries: 3
-            });
-            for await (const delta of result.textStream) {
-              controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: delta } }] })}\n\n`));
-              aiText += delta;
+
+            try {
+              const { result } = await streamWithFallback((model) => ({
+                model,
+                messages: synthesizeMessages,
+                temperature: 0.3,
+                maxTokens: 1000,
+                maxRetries: 1, 
+              }));
+
+              for await (const delta of result.textStream) {
+                controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: delta } }] })}\n\n`));
+                aiText += delta;
+              }
+            } catch (e: any) {
+              aiText = "*(System: All AI providers are currently unavailable or rate-limited. Please try again shortly.)*";
+              controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: aiText } }] })}\n\n`));
             }
           } else {
             aiText = `I searched for "${query}", but couldn't find a direct answer.`;
@@ -193,7 +244,7 @@ export async function POST(req: Request) {
 
     // --- AUTONOMOUS CODE PIPELINE ---
     const isCodingQuestion = lowerUserPrompt.includes("code") || lowerUserPrompt.includes("algorithm") || lowerUserPrompt.includes("trace") || lowerUserPrompt.includes("solve") || lowerUserPrompt.includes("string") || lowerUserPrompt.includes("array") || lowerUserPrompt.includes("tree") || lowerUserPrompt.includes("graph") || lowerUserPrompt.includes("dp");
-    
+
     if (isCodingQuestion) {
       const systemPrompt = `You are the CS Hub AI, an expert coding assistant.
       MANDATORY DEBUGGING WORKFLOW:
@@ -202,7 +253,7 @@ export async function POST(req: Request) {
       3. Read the REAL output/error returned by the tool. Do not guess.
       4. If there is an error, FIX the code and invoke execute_code again. Repeat until correct.
       5. Only after the tool passes should you give your final answer to the user. State what you verified.
-      
+
       ABSOLUTE RULE ON TOOL USAGE:
       - You CANNOT call tools by writing Python code like "execute_code(...)". That code will never run.
       - You MUST invoke the tool DIRECTLY using the native function calling mechanism (JSON format).
@@ -216,53 +267,64 @@ export async function POST(req: Request) {
 
       const toolCallLog: any[] = [];
 
-      const result = await streamText({
-        model: cerebras(AI_MODEL), // Uses environment variable
-        messages: [
-          { role: "system", content: systemPrompt },
-          ...recentMessages
-        ],
-        temperature: 0.1,
-        maxSteps: 3, 
-        maxTokens: 3000,
-        maxRetries: 3,
-        toolChoice: 'required', 
-        tools: {
-          execute_code: tool({
-            description: 'Executes Python code and returns stdout, stderr, and exit code.',
-            parameters: z.object({
-              code: z.string().describe('The complete Python code to execute'),
-            }),
-            execute: async ({ code }) => {
-              try {
-                const pistonRes = await fetchWithTimeout("https://emkc.org/api/v2/piston/execute", {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({
-                    language: "python",
-                    version: "3.10.0",
-                    files: [{ name: "main.py", content: code }]
-                  })
-                }, 15000);
+      let streamResult;
+      let usedProvider = "none";
+      try {
+        const { result, providerName } = await streamWithFallback((model) => ({
+          model,
+          messages: [
+            { role: "system", content: systemPrompt },
+            ...recentMessages
+          ],
+          temperature: 0.1,
+          maxSteps: 3,
+          maxTokens: 3000,
+          maxRetries: 1,
+          toolChoice: 'required',
+          tools: {
+            execute_code: tool({
+              description: 'Executes Python code and returns stdout, stderr, and exit code.',
+              parameters: z.object({
+                code: z.string().describe('The complete Python code to execute'),
+              }),
+              execute: async ({ code }) => {
+                try {
+                  const pistonRes = await fetchWithTimeout("https://emkc.org/api/v2/piston/execute", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                      language: "python",
+                      version: "3.10.0",
+                      files: [{ name: "main.py", content: code }]
+                    })
+                  }, 15000);
 
-                if (pistonRes.ok) {
-                  const pistonData = await pistonRes.json();
-                  const stdout = pistonData.run.output || "";
-                  const stderr = pistonData.run.stderr || "";
-                  toolCallLog.push({ type: "execute_code", result: { stdout, stderr } });
-                  return { stdout, stderr };
-                } else {
-                  toolCallLog.push({ type: "execute_code", result: { error: "Sandbox rate limited" } });
-                  return { stdout: "", stderr: "Sandbox rate limited or unavailable." };
+                  if (pistonRes.ok) {
+                    const pistonData = await pistonRes.json();
+                    const stdout = pistonData.run.output || "";
+                    const stderr = pistonData.run.stderr || "";
+                    toolCallLog.push({ type: "execute_code", result: { stdout, stderr } });
+                    return { stdout, stderr };
+                  } else {
+                    toolCallLog.push({ type: "execute_code", result: { error: "Sandbox rate limited" } });
+                    return { stdout: "", stderr: "Sandbox rate limited or unavailable." };
+                  }
+                } catch (e) {
+                  toolCallLog.push({ type: "execute_code", result: { error: "Network error" } });
+                  return { stdout: "", stderr: "Execution network error." };
                 }
-              } catch (e) {
-                toolCallLog.push({ type: "execute_code", result: { error: "Network error" } });
-                return { stdout: "", stderr: "Execution network error." };
               }
-            }
-          })
-        }
-      });
+            })
+          }
+        }));
+        streamResult = result;
+        usedProvider = providerName;
+      } catch (fallbackError: any) {
+        return new Response(
+          JSON.stringify({ error: "All AI providers are currently unavailable.", details: fallbackError.message }),
+          { status: 503 }
+        );
+      }
 
       // Stream the response to the UI
       const encoder = new TextEncoder();
@@ -274,12 +336,12 @@ export async function POST(req: Request) {
           }, 5000);
 
           try {
-            for await (const delta of result.textStream) {
+            for await (const delta of streamResult.textStream) {
               fullText += delta;
               controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: delta } }] })}\n\n`));
             }
           } catch (streamError: any) {
-            console.error("Stream Interruption:", streamError);
+            console.error(`Stream Interruption (provider: ${usedProvider}):`, streamError);
             const errorMsg = "\n\n*(System: The AI stream was interrupted due to a rate limit or network timeout. Please try again.)*";
             if (!fullText.includes(errorMsg)) {
               controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: errorMsg } }] })}\n\n`));
@@ -317,19 +379,28 @@ export async function POST(req: Request) {
         ...recentMessages.map((m: any) => ({ role: m.role === "assistant" ? "assistant" : "user", content: m.content.includes("data:image") ? "[Image]" : m.content }))
       ];
 
-      const result = await streamText({
-        model: cerebras(AI_MODEL), // Uses environment variable
-        messages: aiMessages,
-        temperature: 0.5,
-        maxTokens: 2000,
-        maxRetries: 3
-      });
+      let streamResult;
+      try {
+        const { result } = await streamWithFallback((model) => ({
+          model,
+          messages: aiMessages,
+          temperature: 0.5,
+          maxTokens: 2000,
+          maxRetries: 1,
+        }));
+        streamResult = result;
+      } catch (fallbackError: any) {
+        return new Response(
+          JSON.stringify({ error: "All AI providers are currently unavailable.", details: fallbackError.message }),
+          { status: 503 }
+        );
+      }
 
       const encoder = new TextEncoder();
       let fullText = "";
       const customStream = new ReadableStream({
         async start(controller) {
-          for await (const delta of result.textStream) {
+          for await (const delta of streamResult.textStream) {
             fullText += delta;
             controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: delta } }] })}\n\n`));
           }
