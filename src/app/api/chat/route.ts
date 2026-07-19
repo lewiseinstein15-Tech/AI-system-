@@ -110,16 +110,10 @@ function extractJsCode(text: string): string | null {
   return match ? match[1].trim() : null;
 }
 
-function extractFunctionName(code: string): string | null {
-  const match = code.match(/function\s+(\w+)\s*\(/);
-  return match ? match[1] : null;
-}
-
-function backendExecute(code: string, funcName: string): { ok: boolean; stdout: string; stderr: string } {
-  const testInput = `5`; 
-  const harness = `${code}\n\nconsole.log(${funcName}(${testInput}));`;
+// Independently re-executes code LOCALLY. Does not force a test input.
+function backendExecute(code: string): { ok: boolean; stdout: string; stderr: string } {
   try {
-    const { stdout, stderr } = executeJsSafely(harness);
+    const { stdout, stderr } = executeJsSafely(code);
     return { ok: stderr.length === 0, stdout, stderr };
   } catch (e: any) {
     return { ok: false, stdout: "", stderr: `Execution error: ${e.message}` };
@@ -281,7 +275,6 @@ export async function POST(req: Request) {
         return { role: m.role === "assistant" ? "assistant" : "user", content: safeContent };
       });
 
-      // CLAUDE'S TRAP-SETTER + REBUILDER IN 1 PROMPT
       const ACT_PROMPT = `You are an elite AI coding assistant. You must follow this EXACT format:
 
 1. **REASONING**: Analyze the problem.
@@ -289,7 +282,7 @@ export async function POST(req: Request) {
    - Outline the algorithm and complexity.
 2. **CODE**: Write the JavaScript solution.
    - Wrap your solution in a single named function.
-   - Use console.log() for any test output.
+   - Include a few \`console.log()\` test cases at the bottom of the code block to prove it works.
 3. **CRITIQUE**: Briefly verify your own state design handles the constraints.
 
 Begin!`;
@@ -315,7 +308,6 @@ Begin!`;
               fullText += header;
               controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: header } }] })}\n\n`));
 
-              // SINGLE API CALL FOR REASON + EXECUTE + CRITIQUE
               const { result } = await streamWithFallback((model) => ({
                 model,
                 messages: [{ role: "system", content: ACT_PROMPT }, ...conversationHistory],
@@ -332,7 +324,6 @@ Begin!`;
               conversationHistory.push({ role: "assistant", content: aiText });
               fullText += aiText;
 
-              // BACKEND VERIFICATION
               const code = extractJsCode(aiText);
               if (!code) {
                 const noCodeMsg = `\n\n⚠️ No code block found. Retrying...\n`;
@@ -342,16 +333,7 @@ Begin!`;
                 continue;
               }
 
-              const funcName = extractFunctionName(code);
-              if (!funcName) {
-                const noFuncMsg = `\n\n⚠️ No function definition found. Retrying...\n`;
-                fullText += noFuncMsg;
-                controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: noFuncMsg } }] })}\n\n`));
-                conversationHistory.push({ role: "user", content: "Your code has no detectable function definition. Wrap your solution in a single named function." });
-                continue;
-              }
-
-              const execResult = backendExecute(code, funcName);
+              const execResult = backendExecute(code);
 
               if (execResult.ok) {
                 verified = true;
@@ -361,12 +343,10 @@ Begin!`;
                 break;
               }
 
-              // Verification failed — feed REAL error back
               const failMsg = `\n\n❌ **VERIFICATION FAILED:** \`${execResult.stderr}\`\n🔄 Re-analyzing the problem...\n`;
               fullText += failMsg;
               controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: failMsg } }] })}\n\n`));
 
-              // Stop condition: if code is identical to last round, stop
               if (code === lastCode) {
                 const stuckMsg = `\n\n⚠️ **Stop condition triggered:** Code is identical to previous attempt. Stopping to prevent infinite loop.`;
                 fullText += stuckMsg;
