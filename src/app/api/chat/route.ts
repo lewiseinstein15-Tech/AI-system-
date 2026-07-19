@@ -13,7 +13,6 @@ const PROVIDERS = [
   { name: "Cerebras", baseURL: "https://api.cerebras.ai/v1", key: "CEREBRAS_API_KEY", model: "llama3.1-8b" },
   { name: "Groq", baseURL: "https://api.groq.com/openai/v1", key: "GROQ_API_KEY", model: "llama-3.1-8b-instant" },
   { name: "OpenRouter", baseURL: "https://openrouter.ai/api/v1", key: "OPENROUTER_API_KEY", model: "deepseek/deepseek-chat-v3:free" },
-  { name: "Gemini", baseURL: "https://:free" },
   { name: "Gemini", baseURL: "https://generativelanguage.googleapis.com/v1beta/openai", key: "GEMINI_API_KEY", model: "gemini-2.5-flash" },
 ];
 
@@ -49,6 +48,10 @@ function truncate(str: string | null, max: number) {
 async function fetchTimeout(url: string, opts: any = {}, ms = 5000) {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), ms);
+  try {
+    return await fetch(url, { ...opts, signal: ctrl.signal });
+  } finally {
+    clearTimeout(t);
   try {
     return await fetch(url, { ...opts, signal: ctrl.signal });
   } finally {
@@ -270,102 +273,6 @@ export async function POST(req: Request) {
       return new Response(stream, { headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" } });
     }
 
-    // --- FIX IT: User wants to fix previous code ---
-    const isFixIt = lowerPrompt.includes("fix it") || lowerPrompt.includes("fix the code") || lowerPrompt.includes("try again") || lowerPrompt.includes("rewrite");
-    
-    if (isFixIt) {
-      const enc = new TextEncoder();
-      
-      // Get last assistant message (should contain the broken code)
-      const lastAssistantMsg = messages.slice().reverse().find((m: any) => m.role === "assistant");
-      let previousCode = "";
-      let previousError = "";
-      
-      if (lastAssistantMsg) {
-        previousCode = extractCode(lastAssistantMsg.content) || "";
-        // Try to run it again to get the exact error
-        if (previousCode) {
-          const result = verifyCode(previousCode);
-          if (!result.ok) {
-            previousError = result.err;
-          } else {
-            previousError = "The code runs but produces incorrect output. Please rewrite with correct logic.";
-          }
-        }
-      }
-
-      const FIX_PROMPT = `The user wants you to FIX your previous code.
-
-Your previous code had this issue: ${previousError || "It was incorrect or incomplete."}
-
-Write a corrected JavaScript solution. Include:
-- Brief explanation of what was wrong
-- The fixed code in a single named function
-- console.log test cases at bottom
-
-Be careful to handle ALL constraints correctly this time.`;
-
-      const stream = new ReadableStream({
-        async start(ctrl) {
-          let full = "";
-
-          try {
-            const res = await callAI(
-              [
-                { role: "system", content: FIX_PROMPT },
-                ...messages.slice(-6).map((m: any) => ({
-                  role: m.role === "assistant" ? "assistant" : "user",
-                  content: m.content.includes("data:image") ? "[Image]" : m.content,
-                })),
-              ],
-              0.2,
-              1500
-            );
-
-            for await (const d of res.textStream) {
-              full += d;
-              ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: d } }] })}\n\n`));
-            }
-
-            // Verify fixed code
-            const code = extractCode(full);
-            if (code) {
-              const result = verifyCode(code);
-              if (result.ok) {
-                const msg = `\n\n✅ **FIXED & VERIFIED** — Output: \`${result.out.trim()}\``;
-                full += msg;
-                ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: msg } }] })}\n\n`));
-              } else {
-                const msg = `\n\n❌ **Still has error:** \`${result.err}\`\n\nThe code crashed. Try rephrasing your original question.`;
-                full += msg;
-                ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: msg } }] })}\n\n`));
-              }
-            } else {
-              const msg = `\n\n⚠️ No code block found.`;
-              full += msg;
-              ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: msg } }] })}\n\n`));
-            }
-          } catch (e: any) {
-            console.error("Stream error:", e);
-            const msg = "\n\n*(System: Error. Please try again.)*";
-            ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: msg } }] })}\n\n`));
-            full += msg;
-          } finally {
-            ctrl.enqueue(enc.encode("data: [DONE]\n\n"));
-            ctrl.close();
-            try {
-              await prisma.message.create({ data: { conversationId: convId, role: "assistant", content: full } });
-              await prisma.conversation.update({ where: { id: convId }, data: { updatedAt: new Date() } });
-            } catch (e) {
-              console.error("DB error:", e);
-            }
-          }
-        },
-      });
-
-      return new Response(stream, { headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" } });
-    }
-
     // --- CODING: ONE SHOT + VERIFY ---
     const isCoding =
       lowerPrompt.includes("code") ||
@@ -434,11 +341,11 @@ Be concise. Get straight to the point.`;
             if (code) {
               const result = verifyCode(code);
               if (result.ok) {
-                const msg = `\n\n✅ **CODE VERIFIED** — Output: \`${result.out.trim()}\`\n\nSay "fix it" if the answer is wrong.`;
+                const msg = `\n\n✅ **CODE VERIFIED** — Output: \`${result.out.trim()}\``;
                 full += msg;
                 ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: msg } }] })}\n\n`));
               } else {
-                const msg = `\n\n❌ **CODE ERROR:** \`${result.err}\`\n\nSay "fix it" to retry.`;
+                const msg = `\n\n❌ **CODE ERROR:** \`${result.err}\``;
                 full += msg;
                 ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: msg } }] })}\n\n`));
               }
