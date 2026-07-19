@@ -113,7 +113,7 @@ function extractFunctionName(code: string): string | null {
 }
 
 function backendExecute(code: string, funcName: string): { ok: boolean; stdout: string; stderr: string } {
-  const testInput = `5`; // Test with a standard integer input
+  const testInput = `5`; 
   const harness = `${code}\n\nconsole.log(${funcName}(${testInput}));`;
   try {
     const { stdout, stderr } = executeJsSafely(harness);
@@ -136,7 +136,7 @@ async function streamAIState(
     messages: [{ role: "system", content: systemPrompt }, ...messages],
     temperature,
     maxTokens: 2000,
-    maxRetries: 3, // Increased to handle rate limits
+    maxRetries: 3, 
   }));
 
   let text = "";
@@ -302,20 +302,20 @@ export async function POST(req: Request) {
         return { role: m.role === "assistant" ? "assistant" : "user", content: safeContent };
       });
 
-      // ACT Prompt Templates (Merged Analyze+Plan to save API calls)
+      // CLAUDE'S TRAP-SETTER & REBUILDER PROMPTS
       const REASON_PROMPT = `You are an expert software engineer analyzing a coding problem.
-Break down the problem concisely:
-- What are the exact inputs, outputs, and constraints?
-- What are the common pitfalls for this type of problem?
-- What is the step-by-step algorithmic plan?
-- What is the time and space complexity?
+Before writing code, you MUST answer these questions:
+1. What are the exact inputs, outputs, and constraints?
+2. If there is a sequence constraint (e.g., "no 3 consecutive moves", "cannot do X twice in a row"), does the state track the last move? Position alone (\`dp[i]\`) is NEVER enough for move-sequence constraints. You MUST use a multi-dimensional state (e.g., \`dp[i][last_move]\`).
+3. What is the step-by-step algorithmic plan?
+4. What is the time and space complexity?
 DO NOT write any code in this stage. Only provide analysis and a plan.`;
 
       const EXECUTE_PROMPT = `Based on your analysis and plan, write the JavaScript solution.
+- If your plan identified a need for a multi-dimensional state (e.g., \`dp[i][last_move]\`), you MUST implement it. Do NOT fall back to a 1D array.
 - Wrap your solution in a single named function.
 - Use console.log() for any test output.
-- Do NOT write a verification section.
-- Do NOT claim to have run the code.`;
+- Do NOT write a verification section.`;
 
       const encoder = new TextEncoder();
       let fullText = "";
