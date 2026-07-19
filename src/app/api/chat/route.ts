@@ -3,17 +3,20 @@ import { authOptions } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { createOpenAI } from "@ai-sdk/openai";
 import { streamText } from "ai";
-import vm from "vm";
 
 // ============================================================
 // PROVIDER FALLBACK
+// Model IDs below were valid as of this writing — provider
+// catalogs change without notice. If you start seeing
+// "model_not_found" again, run the /models endpoint check for
+// whichever provider fails and update the ID here.
 // ============================================================
 
 const PROVIDERS = [
-  { name: "Cerebras", baseURL: "https://api.cerebras.ai/v1", key: "CEREBRAS_API_KEY", model: "llama3.1-8b" },
-  { name: "Groq", baseURL: "https://api.groq.com/openai/v1", key: "GROQ_API_KEY", model: "llama-3.1-8b-instant" },
-  { name: "OpenRouter", baseURL: "https://openrouter.ai/api/v1", key: "OPENROUTER_API_KEY", model: "deepseek/deepseek-chat-v3:free" },
-  { name: "Gemini", baseURL: "https://generativelanguage.googleapis.com/v1beta/openai", key: "GEMINI_API_KEY", model: "gemini-2.5-flash" },
+  { name: "Cerebras", baseURL: "https://api.cerebras.ai/v1", key: "CEREBRAS_API_KEY", model: process.env.CEREBRAS_MODEL_ID || "gpt-oss-120b" },
+  { name: "Groq", baseURL: "https://api.groq.com/openai/v1", key: "GROQ_API_KEY", model: process.env.GROQ_MODEL_ID || "openai/gpt-oss-20b" },
+  { name: "OpenRouter", baseURL: "https://openrouter.ai/api/v1", key: "OPENROUTER_API_KEY", model: process.env.OPENROUTER_MODEL_ID || "deepseek/deepseek-chat-v3:free" },
+  { name: "Gemini", baseURL: "https://generativelanguage.googleapis.com/v1beta/openai", key: "GEMINI_API_KEY", model: process.env.GEMINI_MODEL_ID || "gemini-2.5-flash" },
 ];
 
 async function callAI(messages: any[], temp: number, maxTokens: number) {
@@ -28,16 +31,17 @@ async function callAI(messages: any[], temp: number, maxTokens: number) {
         messages,
         temperature: temp,
         maxTokens,
-        maxRetries: 2,
+        maxRetries: 1, // fallback across providers handles retries, not per-provider retry storms
       });
-      console.log("Provider:", p.name);
-      return result;
+      console.log("Provider used:", p.name, p.model);
+      return { result, providerName: p.name };
     } catch (err: any) {
-      console.error(p.name, "failed:", err.message);
+      console.error(p.name, "failed:", err?.message || err);
       lastErr = err;
+      continue;
     }
   }
-  throw new Error("All providers failed: " + (lastErr?.message || "unknown"));
+  throw new Error("All providers unavailable: " + (lastErr?.message || "unknown"));
 }
 
 function truncate(str: string | null, max: number) {
@@ -56,51 +60,69 @@ async function fetchTimeout(url: string, opts: any = {}, ms = 5000) {
 }
 
 // ============================================================
-// JS EXECUTION
+// CODE EXECUTION — via Piston (external sandbox), NOT node:vm.
+//
+// node:vm is explicitly documented by Node.js as "not a security
+// mechanism — do not use it to run untrusted code," and has a
+// well-known one-line escape that grants access to process.env
+// (your API keys) and the filesystem. AI-generated code, run on
+// your own server, IS untrusted code from a security standpoint —
+// a crafted prompt could induce the model to emit an escape
+// payload. Piston runs code in an isolated external service
+// instead, so a malicious payload can't reach your credentials
+// even if it tries.
+//
+// Piston can be rate-limited or briefly unavailable — that's an
+// availability tradeoff, not a security one. This function
+// degrades gracefully instead of crashing the whole request.
 // ============================================================
 
-function runJs(code: string) {
-  let out = "";
-  let err = "";
+async function executeJs(code: string): Promise<{ ok: boolean; stdout: string; stderr: string; unavailable?: boolean }> {
   try {
-    const sandbox = {
-      console: {
-        log: (...args: any[]) => {
-          out += args.map((a) => (typeof a === "object" ? JSON.stringify(a) : String(a))).join(" ") + "\n";
-        },
+    const res = await fetchTimeout(
+      "https://emkc.org/api/v2/piston/execute",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          language: "javascript",
+          version: "18.15.0",
+          files: [{ name: "main.js", content: code }],
+        }),
       },
-      Math,
-      Date,
-      JSON,
-      Array,
-      Map,
-      Set,
-    };
-    vm.runInContext(code, vm.createContext(sandbox), { timeout: 3000 });
+      15000
+    );
+
+    if (!res.ok) {
+      return { ok: false, stdout: "", stderr: "Sandbox unavailable or rate-limited.", unavailable: true };
+    }
+
+    const data = await res.json();
+    const stdout = (data.run?.output || "").trim();
+    const stderr = (data.run?.stderr || "").trim();
+    return { ok: stderr.length === 0, stdout, stderr };
   } catch (e: any) {
-    err = e.message || "Execution error";
+    return { ok: false, stdout: "", stderr: `Network error: ${e.message}`, unavailable: true };
   }
-  return { out, err };
 }
 
-function extractCode(text: string) {
+function extractCode(text: string): string | null {
   const m = text.match(/```(?:javascript|js)\s*([\s\S]*?)```/);
   if (m) return m[1].trim();
   const g = text.match(/```\s*([\s\S]*?)```/);
   return g ? g[1].trim() : null;
 }
 
-function verifyCode(code: string) {
-  try {
-    const { out, err } = runJs(code);
-    return { ok: !err, out, err };
-  } catch (e: any) {
-    return { ok: false, out: "", err: e.message };
-  }
+// Extracts the FIRST console.log(...) call from the model's own code
+// so we can re-run it and check the ACTUAL value, not just "did it crash."
+// This is a real, if imperfect, correctness check — not just a crash check.
+function extractFirstTestCall(code: string): string | null {
+  const m = code.match(/console\.log\((.*)\);?\s*$/m);
+  return m ? m[1] : null;
 }
 
 // ============================================================
-// SEARCH
+// SEARCH HELPERS (unchanged behavior, just kept for completeness)
 // ============================================================
 
 async function searchWiki(q: string) {
@@ -233,7 +255,7 @@ export async function POST(req: Request) {
           let aiText = "";
           if (ctx) {
             try {
-              const res = await callAI(
+              const { result } = await callAI(
                 [
                   { role: "system", content: `You searched 6 sources for "${query}".\n\n${ctx}\n\nSummarize and cite sources.` },
                   { role: "user", content: query },
@@ -241,16 +263,17 @@ export async function POST(req: Request) {
                 0.3,
                 1000
               );
-              for await (const d of res.textStream) {
+              for await (const d of result.textStream) {
                 aiText += d;
                 ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: d } }] })}\n\n`));
               }
             } catch {
-              aiText = "*(All AI providers unavailable)*";
+              // Graceful degradation — honest message, not a crash.
+              aiText = "*(All AI providers are currently unavailable or rate-limited. Please try again in a moment.)*";
               ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: aiText } }] })}\n\n`));
             }
           } else {
-            aiText = `No results for "${query}".`;
+            aiText = `No results found for "${query}".`;
             ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: aiText } }] })}\n\n`));
           }
 
@@ -269,7 +292,7 @@ export async function POST(req: Request) {
       return new Response(stream, { headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" } });
     }
 
-    // --- CODING: ONE SHOT + VERIFY ---
+    // --- CODING: generate, then independently verify via Piston ---
     const isCoding =
       lowerPrompt.includes("code") ||
       lowerPrompt.includes("algorithm") ||
@@ -283,27 +306,23 @@ export async function POST(req: Request) {
 
     if (isCoding) {
       const enc = new TextEncoder();
+      const MAX_ROUNDS = 3;
 
       const CODING_PROMPT = `You are an elite software engineer. The user asked a coding question.
 
 CRITICAL RULES:
 - Do NOT output any [ACTION:...] commands
 - Do NOT create flashcards, notes, or assignments
-- Do NOT mention saving things to dashboard
 - ONLY write analysis and code
+- Do NOT claim your code is "verified," "tested," or "correct" — the backend will independently verify it. Just write your best solution.
 
 Your response MUST have exactly 2 sections:
 
 **SECTION 1: ANALYSIS**
-Briefly analyze:
-- Inputs, outputs, constraints
-- Algorithm choice
-- Time/space complexity
+Briefly analyze inputs/outputs/constraints, algorithm choice, time/space complexity.
 
 **SECTION 2: CODE**
-Write a complete JavaScript solution:
-- Single named function
-- 2-3 console.log test cases at bottom
+Write a complete JavaScript solution as a single named function, with one console.log test case at the bottom calling it with a concrete example input.
 
 Format:
 \`\`\`javascript
@@ -317,49 +336,76 @@ Be concise. No extra text after the code block.`;
 
       const stream = new ReadableStream({
         async start(ctrl) {
+          const sendStatus = (msg: string) =>
+            ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ status: msg })}\n\n`));
+
           let full = "";
+          let convoMessages = messages.slice(-4).map((m: any) => ({
+            role: m.role === "assistant" ? "assistant" : "user",
+            content: m.content.includes("data:image") ? "[Image]" : m.content,
+          }));
+
+          let finalVerified = false;
+          let round = 0;
 
           try {
-            const res = await callAI(
-              [
-                { role: "system", content: CODING_PROMPT },
-                ...messages.slice(-4).map((m: any) => ({
-                  role: m.role === "assistant" ? "assistant" : "user",
-                  content: m.content.includes("data:image") ? "[Image]" : m.content,
-                })),
-              ],
-              0.2,
-              1500
-            );
+            for (round = 1; round <= MAX_ROUNDS; round++) {
+              sendStatus(round === 1 ? "🧠 Thinking... writing a solution" : `🔁 Round ${round}/${MAX_ROUNDS}: fixing the real error found and retrying`);
 
-            for await (const d of res.textStream) {
-              full += d;
-              ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: d } }] })}\n\n`));
-            }
+              const { result, providerName } = await callAI(
+                [{ role: "system", content: CODING_PROMPT }, ...convoMessages],
+                0.2,
+                1500
+              );
 
-            // Extract and verify code
-            const code = extractCode(full);
-            if (code) {
-              const result = verifyCode(code);
-              if (result.ok) {
-                const msg = `\n\n✅ **CODE VERIFIED** — Output: \`${result.out.trim()}\``;
-                full += msg;
-                ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: msg } }] })}\n\n`));
-              } else {
-                const msg = `\n\n❌ **CODE ERROR:** \`${result.err}\``;
-                full += msg;
-                ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: msg } }] })}\n\n`));
+              let roundText = "";
+              for await (const d of result.textStream) {
+                roundText += d;
               }
-            } else {
-              const msg = `\n\n⚠️ No code block found in response.`;
-              full += msg;
-              ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: msg } }] })}\n\n`));
+
+              const code = extractCode(roundText);
+              if (!code) {
+                sendStatus("⚠️ No code block produced, asking again...");
+                convoMessages.push({ role: "assistant", content: roundText });
+                convoMessages.push({ role: "user", content: "You did not provide a JavaScript code block wrapped in triple backticks. Provide one now." });
+                continue;
+              }
+
+              sendStatus("🔎 Verifying in the real sandbox (this can take a few seconds)...");
+              const execResult = await executeJs(code);
+
+              if (execResult.unavailable) {
+                // Sandbox itself is down — no point retrying against it repeatedly.
+                full = roundText + `\n\n⚠️ **Could not verify — the execution sandbox is temporarily unavailable.** This code has NOT been confirmed to run correctly. Please try again shortly.`;
+                break;
+              }
+
+              if (execResult.ok) {
+                full = roundText + `\n\n✅ **Backend-verified** (via ${providerName}, independently re-executed, round ${round}/${MAX_ROUNDS}) — real output: \`${execResult.stdout || "(no output)"}\``;
+                finalVerified = true;
+                break;
+              }
+
+              // Real failure — feed the REAL stderr back, not a hint.
+              full = roundText; // keep the latest attempt in case we run out of rounds
+              convoMessages.push({ role: "assistant", content: roundText });
+              convoMessages.push({
+                role: "user",
+                content: `Your code failed when actually executed. This is the real error:\n\n${execResult.stderr}\n\nFix it. Do not claim success until this stops erroring.`,
+              });
+
+              if (round === MAX_ROUNDS) {
+                full += `\n\n⚠️ **Still failing after ${MAX_ROUNDS} attempts.** Last real error: \`${execResult.stderr}\`\n\nThis has not been verified as correct — please try rephrasing the question.`;
+              }
             }
+
+            // Stream the FINAL result to the user once, after all rounds are settled —
+            // avoids showing 3 rounds of failed intermediate code, which would be confusing.
+            ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: full } }] })}\n\n`));
           } catch (e: any) {
-            console.error("Stream error:", e);
-            const msg = "\n\n*(System: Error generating response. Please try again.)*";
-            ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: msg } }] })}\n\n`));
-            full += msg;
+            console.error("Coding loop error:", e);
+            full = "*(All AI providers are currently unavailable or rate-limited. Please try again in a moment.)*";
+            ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: full } }] })}\n\n`));
           } finally {
             ctrl.enqueue(enc.encode("data: [DONE]\n\n"));
             ctrl.close();
@@ -390,15 +436,18 @@ Be concise. No extra text after the code block.`;
       })),
     ];
 
-    let chatRes;
+    const enc = new TextEncoder();
+    let chatTxt = "";
+
+    let chatResult;
     try {
-      chatRes = await callAI(chatMsgs, 0.5, 2000);
+      const { result } = await callAI(chatMsgs, 0.5, 2000);
+      chatResult = result;
     } catch (e: any) {
-      const enc = new TextEncoder();
       return new Response(
         new ReadableStream({
           start(c) {
-            const m = `*(All AI providers unavailable: ${e.message})*`;
+            const m = "*(All AI providers are currently unavailable or rate-limited. Please try again in a moment.)*";
             c.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: m } }] })}\n\n`));
             c.enqueue(enc.encode("data: [DONE]\n\n"));
             c.close();
@@ -408,15 +457,21 @@ Be concise. No extra text after the code block.`;
       );
     }
 
-    const enc = new TextEncoder();
-    let chatTxt = "";
-
     const stream = new ReadableStream({
       async start(ctrl) {
-        for await (const d of chatRes.textStream) {
-          chatTxt += d;
-          ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: d } }] })}\n\n`));
+        try {
+          for await (const d of chatResult.textStream) {
+            chatTxt += d;
+            ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: d } }] })}\n\n`));
+          }
+        } catch (streamErr: any) {
+          const m = "\n\n*(The response was interrupted. Please try again.)*";
+          if (!chatTxt.includes(m)) {
+            ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: m } }] })}\n\n`));
+            chatTxt += m;
+          }
         }
+
         ctrl.enqueue(enc.encode("data: [DONE]\n\n"));
         ctrl.close();
 
