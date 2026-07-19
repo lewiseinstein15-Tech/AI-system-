@@ -74,27 +74,54 @@ async function fetchWithTimeout(url: string, options: any = {}, ms: number = 500
   }
 }
 
+// --- RESILIENT PISTON SANDBOX (WITH RETRIES) ---
+const PISTON_API_URL = "https://emkc.org/api/v2/piston/execute";
+async function runPistonWithRetries(language: string, version: string, code: string, stdin: string = "", retries = 3) {
+  for (let i = 0; i < retries; i++) {
+    try {
+      const res = await fetchWithTimeout(PISTON_API_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ language, version, files: [{ content: code }], stdin }),
+      }, 15000);
+
+      // If Piston is rate-limiting us (429) or having a server error (5xx), wait and retry
+      if (res.status === 429 || res.status >= 500) {
+        console.warn(`Piston returned ${res.status}, retrying in ${i+1}s...`);
+        await new Promise(r => setTimeout(r, 1000 * (i + 1)));
+        continue;
+      }
+      
+      if (!res.ok) throw new Error(`Sandbox failed with status ${res.status}`);
+      
+      const data = await res.json();
+      return data.run || {};
+    } catch (e: any) {
+      if (i === retries - 1) throw e; // Throw on last attempt
+      console.warn(`Piston request failed (${e.message}), retrying...`);
+      await new Promise(r => setTimeout(r, 1000 * (i + 1)));
+    }
+  }
+  throw new Error("Sandbox failed after multiple retries");
+}
+
 // --- CLAUDE'S BACKEND-ENFORCED VERIFICATION ---
 async function backendVerify(aiResponseText: string): Promise<string> {
-  // Extract the last Python code block from the AI's response
   const codeMatches = [...aiResponseText.matchAll(/```python\n?([\s\S]*?)```/g)];
-  if (codeMatches.length === 0) return ""; // No code found to verify
+  if (codeMatches.length === 0) return ""; 
 
   const finalCode = codeMatches[codeMatches.length - 1][1].trim();
-
-  // Extract function name to build the test harness
   const funcMatch = finalCode.match(/def\s+(\w+)\s*\(/);
-  if (!funcMatch) {
-    // If it's just a script, run it as-is
-    const res = await fetchWithTimeout("https://emkc.org/api/v2/piston/execute", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ language: "python", version: "3.10.0", files: [{ name: "verify.py", content: finalCode }] })
-    }, 15000);
 
-    if (!res.ok) return "\n\n⚠️ **Backend Verification Failed** (Sandbox unavailable).";
-    const data = await res.json();
-    return `\n\n✅ **Backend-verified output** (independently re-run by the server, not self-reported by the AI):\n\`\`\`\n${data.run.output || data.run.stderr}\n\`\`\``;
+  if (!funcMatch) {
+    try {
+      const run = await runPistonWithRetries("python", "3.10.0", finalCode);
+      const stdout = run.stdout || "";
+      const stderr = run.stderr || "";
+      return `\n\n✅ **Backend-verified output** (independently re-run by the server, not self-reported by the AI):\n\`\`\`\n${stdout || stderr}\n\`\`\``;
+    } catch (e: any) {
+      return `\n\n⚠️ **Backend Verification Failed** (Sandbox unavailable: ${e.message}).`;
+    }
   }
 
   const funcName = funcMatch[1];
@@ -111,29 +138,16 @@ print(results)
 `;
 
   try {
-    const res = await fetchWithTimeout("https://emkc.org/api/v2/piston/execute", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        language: "python",
-        version: "3.10.0",
-        files: [{ name: "verify.py", content: testHarness }]
-      })
-    }, 15000);
-
-    if (!res.ok) return "\n\n⚠️ **Backend Verification Failed** (Sandbox unavailable).";
-
-    const data = await res.json();
-    const stdout = data.run.output?.trim();
-    const stderr = data.run.stderr?.trim();
+    const run = await runPistonWithRetries("python", "3.10.0", testHarness);
+    const stdout = run.stdout?.trim();
+    const stderr = run.stderr?.trim();
 
     if (stderr) return `\n\n⚠️ **Backend re-execution found an error the model missed:**\n\`\`\`\n${stderr}\n\`\`\``;
     return `\n\n✅ **Backend-verified output** (independently re-run by the server for n=0 to 15, not self-reported by the AI):\n\`\`\`\n${stdout}\n\`\`\``;
   } catch (e: any) {
-    return `\n\n⚠️ **Backend Verification Failed** (Network error: ${e.message}).`;
+    return `\n\n⚠️ **Backend Verification Failed** (Sandbox unavailable: ${e.message}).`;
   }
 }
-
 
 // --- MEGA SEARCH AGENT HELPERS ---
 async function searchWiki(query: string) {
@@ -296,8 +310,6 @@ export async function POST(req: Request) {
         return { role: m.role === "assistant" ? "assistant" : "user", content: safeContent };
       });
 
-      const toolCallLog: any[] = [];
-
       let streamResult;
       let usedProvider = "none";
       try {
@@ -319,29 +331,12 @@ export async function POST(req: Request) {
               }),
               execute: async ({ code }) => {
                 try {
-                  const pistonRes = await fetchWithTimeout("https://emkc.org/api/v2/piston/execute", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({
-                      language: "python",
-                      version: "3.10.0",
-                      files: [{ name: "main.py", content: code }]
-                    })
-                  }, 15000);
-
-                  if (pistonRes.ok) {
-                    const pistonData = await pistonRes.json();
-                    const stdout = pistonData.run.output || "";
-                    const stderr = pistonData.run.stderr || "";
-                    toolCallLog.push({ type: "execute_code", result: { stdout, stderr } });
-                    return { stdout, stderr };
-                  } else {
-                    toolCallLog.push({ type: "execute_code", result: { stdout: "", stderr: "Sandbox rate limited" } });
-                    return { stdout: "", stderr: "Sandbox rate limited or unavailable." };
-                  }
-                } catch (e) {
-                  toolCallLog.push({ type: "execute_code", result: { stdout: "", stderr: "Network error" } });
-                  return { stdout: "", stderr: "Execution network error." };
+                  const run = await runPistonWithRetries("python", "3.10.0", code);
+                  const stdout = run.output || "";
+                  const stderr = run.stderr || "";
+                  return { stdout, stderr };
+                } catch (e: any) {
+                  return { stdout: "", stderr: `Execution failed: ${e.message}` };
                 }
               }
             })
@@ -366,7 +361,7 @@ export async function POST(req: Request) {
           }, 5000);
 
           try {
-            // Use fullStream to catch tool calls AND display real sandbox output to the UI
+            // FIX: Use fullStream to catch tool calls AND display real sandbox output to the UI
             for await (const part of streamResult.fullStream) {
               if (part.type === 'text-delta') {
                 fullText += part.textDelta;
