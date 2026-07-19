@@ -97,10 +97,10 @@ function executeJsSafely(code: string): { stdout: string; stderr: string } {
 }
 
 // ============================================================
-// THE VERIFICATION LOOP (CLAUDE'S ARCHITECTURE + LOCAL JS)
+// ACT STATE MACHINE (ANALYZE → PLAN → EXECUTE → VERIFY)
 // ============================================================
 
-const MAX_LOOP_ROUNDS = 3;
+const MAX_ACT_ROUNDS = 2; // 2 rounds × 3 states = 6 API calls max
 
 function extractJsCode(text: string): string | null {
   const match = text.match(/```javascript\s*([\s\S]*?)```/) || text.match(/```\s*([\s\S]*?)```/);
@@ -112,10 +112,8 @@ function extractFunctionName(code: string): string | null {
   return match ? match[1] : null;
 }
 
-// Independently re-executes code LOCALLY. Does not rely on anything the model claims.
 function backendExecute(code: string, funcName: string): { ok: boolean; stdout: string; stderr: string } {
-  // Build a test harness that actually calls the AI's function with a test input
-  const testInput = `"a1b2c3"`; // Test string input
+  const testInput = `"a1b2c3"`;
   const harness = `${code}\n\nconsole.log(${funcName}(${testInput}));`;
   try {
     const { stdout, stderr } = executeJsSafely(harness);
@@ -125,65 +123,34 @@ function backendExecute(code: string, funcName: string): { ok: boolean; stdout: 
   }
 }
 
-// Runs the model in a loop: generate -> backend-verify -> if failed,
-// feed the REAL error back and force a fix -> repeat until it actually works.
-async function verificationLoop(
+// Stream a single AI state (ANALYZE, PLAN, or EXECUTE)
+async function streamAIState(
   systemPrompt: string,
-  userMessages: any[]
-): Promise<{ finalText: string; verified: boolean; rounds: number; log: string[] }> {
-  const log: string[] = [];
-  let messages = [...userMessages];
-  let lastText = "";
+  messages: any[],
+  temperature: number,
+  controller: any,
+  encoder: TextEncoder
+): Promise<string> {
+  const { result } = await streamWithFallback((model) => ({
+    model,
+    messages: [{ role: "system", content: systemPrompt }, ...messages],
+    temperature,
+    maxTokens: 2000,
+    maxRetries: 1,
+  }));
 
-  for (let round = 1; round <= MAX_LOOP_ROUNDS; round++) {
-    const { result } = await streamWithFallback((model) => ({
-      model,
-      messages: [{ role: "system", content: systemPrompt }, ...messages],
-      temperature: 0.1,
-      maxTokens: 2000,
-      maxRetries: 1,
-    }));
-
-    let text = "";
-    for await (const delta of result.textStream) text += delta;
-    lastText = text;
-
-    const code = extractJsCode(text);
-    if (!code) {
-      log.push(`Round ${round}: no code block found in model output.`);
-      messages.push({ role: "assistant", content: text });
-      messages.push({ role: "user", content: "You did not provide a javascript code block. Provide one now, wrapped in triple backticks." });
-      continue;
-    }
-
-    const funcName = extractFunctionName(code);
-    if (!funcName) {
-      log.push(`Round ${round}: could not detect a function definition.`);
-      messages.push({ role: "assistant", content: text });
-      messages.push({ role: "user", content: "Your code has no detectable function definition. Wrap your solution in a single named function." });
-      continue;
-    }
-
-    const execResult = backendExecute(code, funcName);
-
-    if (execResult.ok) {
-      log.push(`Round ${round}: backend execution succeeded. Real stdout: ${execResult.stdout}`);
-      return { finalText: text, verified: true, rounds: round, log };
-    }
-
-    // Real failure — feed the REAL error back, not a hint, the actual stderr.
-    log.push(`Round ${round}: backend execution FAILED. Real stderr: ${execResult.stderr}`);
-    messages.push({ role: "assistant", content: text });
-    messages.push({
-      role: "user",
-      content: `Your code failed when actually executed by the backend. This is the REAL error, not a simulation:\n\n${execResult.stderr}\n\nFix the code. Do not claim success until this actually stops erroring.`,
-    });
+  let text = "";
+  for await (const delta of result.textStream) {
+    text += delta;
+    controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: delta } }] })}\n\n`));
   }
-
-  return { finalText: lastText, verified: false, rounds: MAX_LOOP_ROUNDS, log };
+  return text;
 }
 
-// --- MEGA SEARCH AGENT HELPERS ---
+// ============================================================
+// MEGA SEARCH AGENT HELPERS
+// ============================================================
+
 async function searchWiki(query: string) {
   const searchRes = await fetchWithTimeout(`https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(query)}&format=json&origin=*`);
   const searchData = await searchRes.json();
@@ -232,6 +199,10 @@ async function searchArxiv(query: string) {
   if (titles.length > 0) return `arXiv Papers: ${titles.join(' | ')}`;
   return null;
 }
+
+// ============================================================
+// MAIN API ROUTE
+// ============================================================
 
 export async function POST(req: Request) {
   try {
@@ -321,48 +292,152 @@ export async function POST(req: Request) {
       return new Response(searchStream, { headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' } });
     }
 
-    // --- AUTONOMOUS CODE PIPELINE ---
+    // --- ACT STATE MACHINE (CODING QUESTIONS) ---
     const isCodingQuestion = lowerUserPrompt.includes("code") || lowerUserPrompt.includes("algorithm") || lowerUserPrompt.includes("trace") || lowerUserPrompt.includes("solve") || lowerUserPrompt.includes("string") || lowerUserPrompt.includes("array") || lowerUserPrompt.includes("tree") || lowerUserPrompt.includes("graph") || lowerUserPrompt.includes("dp");
 
     if (isCodingQuestion) {
-      const systemPrompt = `You are CS Hub AI, an expert coding assistant. 
-      When asked a coding question, write the solution in JavaScript inside a markdown block. 
-      Explain your approach, state design, and time/space complexity. 
-      DO NOT write a "Verification" section. DO NOT claim to have run or verified the code. 
-      The backend system will automatically run and verify your code independently.`;
-
       const recentMessages = messages.slice(-4).map((m: any) => {
         let safeContent = m.content;
         if (safeContent.includes("data:image")) safeContent = "[User attached an image.]";
         return { role: m.role === "assistant" ? "assistant" : "user", content: safeContent };
       });
 
-      // ── THE VERIFICATION LOOP RUNS HERE ──
-      const loopResult = await verificationLoop(
-        systemPrompt,
-        recentMessages
-      );
+      // ACT Prompt Templates
+      const ANALYZE_PROMPT = `You are an expert software engineer analyzing a coding problem.
+Break down the problem concisely:
+- What are the exact inputs and outputs?
+- What are the constraints and edge cases?
+- What are the common pitfalls for this type of problem?
+- What algorithmic approach is best suited?
+Be specific and concise.`;
+
+      const PLAN_PROMPT = `Based on your analysis, create a concise implementation plan:
+- What data structures will you use?
+- What is the step-by-step algorithm?
+- How will you handle each edge case?
+- What is the time and space complexity?
+Be specific and concise.`;
+
+      const EXECUTE_PROMPT = `Based on your plan, write the JavaScript solution.
+- Wrap your solution in a single named function.
+- Use console.log() for any test output.
+- Do NOT write a verification section.
+- Do NOT claim to have run the code.`;
 
       const encoder = new TextEncoder();
-      let fullText = loopResult.finalText;
-      
-      // Append verification stamp
-      if (loopResult.verified) {
-        fullText += `\n\n✅ **Backend-verified** — this code was independently re-executed by the server (${loopResult.rounds} round${loopResult.rounds > 1 ? "s" : ""} needed) and confirmed to run without error. This is not a self-reported claim from the AI.`;
-      } else {
-        fullText += `\n\n⚠️ **Could not verify this solution.** After ${loopResult.rounds} attempts, the backend still could not get this code to execute successfully. Do not treat this as a correct answer — please try again or rephrase the question.`;
-      }
+      let fullText = "";
+      let conversationHistory = [...recentMessages];
+      let verified = false;
+      let roundsUsed = 0;
+      let lastCode = "";
 
       const customStream = new ReadableStream({
         async start(controller) {
-          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: fullText } }] })}\n\n`));
-          controller.enqueue(encoder.encode('data: [DONE]\n\n'));
-          controller.close();
+          const heartbeat = setInterval(() => {
+            controller.enqueue(encoder.encode(`: heartbeat\n\n`));
+          }, 5000);
 
-          console.log("Verification loop log:", loopResult.log);
+          try {
+            for (let round = 1; round <= MAX_ACT_ROUNDS; round++) {
+              roundsUsed = round;
 
-          await prisma.message.create({ data: { conversationId: currentConvId, role: "assistant", content: fullText } });
-          await prisma.conversation.update({ where: { id: currentConvId }, data: { updatedAt: new Date() } });
+              // ── STATE 1: ANALYZE ──
+              const analyzeHeader = `\n🔍 **ANALYZING (Round ${round})...**\n\n`;
+              fullText += analyzeHeader;
+              controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: analyzeHeader } }] })}\n\n`));
+
+              const analyzeText = await streamAIState(ANALYZE_PROMPT, conversationHistory, 0.2, controller, encoder);
+              conversationHistory.push({ role: "assistant", content: analyzeText });
+              fullText += analyzeText;
+
+              // ── STATE 2: PLAN ──
+              const planHeader = `\n\n📋 **PLANNING...**\n\n`;
+              fullText += planHeader;
+              controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: planHeader } }] })}\n\n`));
+
+              const planText = await streamAIState(PLAN_PROMPT, conversationHistory, 0.3, controller, encoder);
+              conversationHistory.push({ role: "assistant", content: planText });
+              fullText += planText;
+
+              // ── STATE 3: EXECUTE ──
+              const executeHeader = `\n\n💻 **CODING...**\n\n`;
+              fullText += executeHeader;
+              controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: executeHeader } }] })}\n\n`));
+
+              const executeText = await streamAIState(EXECUTE_PROMPT, conversationHistory, 0.1, controller, encoder);
+              conversationHistory.push({ role: "assistant", content: executeText });
+              fullText += executeText;
+
+              // ── STATE 4: VERIFY ──
+              const code = extractJsCode(executeText);
+              if (!code) {
+                const noCodeMsg = `\n\n⚠️ No code block found. Retrying...\n`;
+                fullText += noCodeMsg;
+                controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: noCodeMsg } }] })}\n\n`));
+                conversationHistory.push({ role: "user", content: "You did not provide a javascript code block. Provide one now." });
+                continue;
+              }
+
+              const funcName = extractFunctionName(code);
+              if (!funcName) {
+                const noFuncMsg = `\n\n⚠️ No function definition found. Retrying...\n`;
+                fullText += noFuncMsg;
+                controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: noFuncMsg } }] })}\n\n`));
+                conversationHistory.push({ role: "user", content: "Your code has no detectable function definition. Wrap your solution in a single named function." });
+                continue;
+              }
+
+              const execResult = backendExecute(code, funcName);
+
+              if (execResult.ok) {
+                verified = true;
+                const verifiedMsg = `\n\n✅ **BACKEND-VERIFIED** — Code was independently re-executed by the server (Round ${round}) and confirmed to run without error. Real output: \`${execResult.stdout.trim()}\``;
+                fullText += verifiedMsg;
+                controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: verifiedMsg } }] })}\n\n`));
+                break;
+              }
+
+              // Verification failed — feed REAL error back and loop to ANALYZE
+              const failMsg = `\n\n❌ **VERIFICATION FAILED:** \`${execResult.stderr}\`\n🔄 Re-analyzing the problem...\n`;
+              fullText += failMsg;
+              controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: failMsg } }] })}\n\n`));
+
+              // Stop condition: if code is identical to last round, stop (stuck in loop)
+              if (code === lastCode) {
+                const stuckMsg = `\n\n⚠️ **Stop condition triggered:** Code is identical to previous attempt. Stopping to prevent infinite loop.`;
+                fullText += stuckMsg;
+                controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: stuckMsg } }] })}\n\n`));
+                break;
+              }
+              lastCode = code;
+
+              conversationHistory.push({
+                role: "user",
+                content: `Your code failed with this REAL error:\n\n${execResult.stderr}\n\nGo back to ANALYZE: What went wrong? What assumption was incorrect? What edge case did you miss?`
+              });
+            }
+
+            if (!verified) {
+              const unverifiedMsg = `\n\n⚠️ **Could not fully verify this solution.** After ${roundsUsed} attempts, the backend could not get this code to execute successfully. Please try rephrasing the question.`;
+              fullText += unverifiedMsg;
+              controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: unverifiedMsg } }] })}\n\n`));
+            }
+
+          } catch (streamError: any) {
+            console.error("Stream Interruption:", streamError);
+            const errorMsg = "\n\n*(System: The AI stream was interrupted. Please try again.)*";
+            if (!fullText.includes(errorMsg)) {
+              controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: errorMsg } }] })}\n\n`));
+              fullText += errorMsg;
+            }
+          } finally {
+            clearInterval(heartbeat);
+            controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+            controller.close();
+
+            await prisma.message.create({ data: { conversationId: currentConvId, role: "assistant", content: fullText } });
+            await prisma.conversation.update({ where: { id: currentConvId }, data: { updatedAt: new Date() } });
+          }
         }
       });
 
