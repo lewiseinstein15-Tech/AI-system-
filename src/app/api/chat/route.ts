@@ -1,97 +1,114 @@
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-import { createOpenAI } from '@ai-sdk/openai';
-import { streamText } from 'ai';
-import vm from 'vm';
+import { createOpenAI } from "@ai-sdk/openai";
+import { streamText } from "ai";
+import vm from "vm";
 
-// ─── CONFIG ───
-const PROVIDERS: { name: string; baseURL: string; apiKeyEnv: string; model: string }[] = [
-  { name: "Cerebras", baseURL: "https://api.cerebras.ai/v1", apiKeyEnv: "CEREBRAS_API_KEY", model: process.env.CEREBRAS_MODEL_ID || "llama3.1-8b" },
-  { name: "Groq", baseURL: "https://api.groq.com/openai/v1", apiKeyEnv: "GROQ_API_KEY", model: process.env.GROQ_MODEL_ID || "llama-3.1-8b-instant" },
-  { name: "OpenRouter", baseURL: "https://openrouter.ai/api/v1", apiKeyEnv: "OPENROUTER_API_KEY", model: process.env.OPENROUTER_MODEL_ID || "deepseek/deepseek-chat-v3:free" },
-  { name: "Gemini", baseURL: "https://generativelanguage.googleapis.com/v1beta/openai", apiKeyEnv: "GEMINI_API_KEY", model: process.env.GEMINI_MODEL_ID || "gemini-2.5-flash" },
+// ============================================================
+// PROVIDER FALLBACK
+// ============================================================
+
+const PROVIDERS = [
+  { name: "Cerebras", baseURL: "https://api.cerebras.ai/v1", key: "CEREBRAS_API_KEY", model: "llama3.1-8b" },
+  { name: "Groq", baseURL: "https://api.groq.com/openai/v1", key: "GROQ_API_KEY", model: "llama-3.1-8b-instant" },
+  { name: "OpenRouter", baseURL: "https://openrouter.ai/api/v1", key: "OPENROUTER_API_KEY", model: "deepseek/deepseek-chat-v3:free" },
+  { name: "Gemini", baseURL: "https://generativelanguage.googleapis.com/v1beta/openai", key: "GEMINI_API_KEY", model: "gemini-2.5-flash" },
 ];
 
-async function streamWithFallback(buildArgs: (model: any) => Parameters<typeof streamText>[0]) {
-  let lastError: any = null;
+async function callAI(messages: any[], temp: number, maxTokens: number) {
+  let lastErr: any = null;
   for (const p of PROVIDERS) {
-    const key = process.env[p.apiKeyEnv];
-    if (!key) continue;
+    const apiKey = process.env[p.key];
+    if (!apiKey) continue;
     try {
-      const client = createOpenAI({ baseURL: p.baseURL, apiKey: key });
-      const result = await streamText(buildArgs(client(p.model)));
-      return { result, providerName: p.name };
-    } catch (e: any) { lastError = e; continue; }
+      const client = createOpenAI({ baseURL: p.baseURL, apiKey });
+      const result = await streamText({
+        model: client(p.model),
+        messages,
+        temperature: temp,
+        maxTokens,
+        maxRetries: 2,
+      });
+      console.log("Provider:", p.name);
+      return result;
+    } catch (err: any) {
+      console.error(p.name, "failed:", err.message);
+      lastErr = err;
+    }
   }
-  throw new Error(`All providers failed: ${lastError?.message || "unknown"}`);
-}
-
-function truncate(str: string | null, max: number://api.cerebras.ai/v1", apiKeyEnv: "CEREBRAS_API_KEY", model: process.env.CEREBRAS_MODEL_ID || "llama3.1-8b" },
-  { name: "Groq", baseURL: "https://api.groq.com/openai/v1", apiKeyEnv: "GROQ_API_KEY", model: process.env.GROQ_MODEL_ID || "llama-3.1-8b-instant" },
-  { name: "OpenRouter", baseURL: "https://openrouter.ai/api/v1", apiKeyEnv: "OPENROUTER_API_KEY", model: process.env.OPENROUTER_MODEL_ID || "deepseek/deepseek-chat-v3:free" },
-  { name: "Gemini", baseURL: "https://generativelanguage.googleapis.com/v1beta/openai", apiKeyEnv: "GEMINI_API_KEY", model: process.env.GEMINI_MODEL_ID || "gemini-2.5-flash" },
-];
-
-async function streamWithFallback(buildArgs: (model: any) => Parameters<typeof streamText>[0]) {
-  let lastError: any = null;
-  for (const p of PROVIDERS) {
-    const key = process.env[p.apiKeyEnv];
-    if (!key) continue;
-    try {
-      const client = createOpenAI({ baseURL: p.baseURL, apiKey: key });
-      const result = await streamText(buildArgs(client(p.model)));
-      return { result, providerName: p.name };
-    } catch (e: any) { lastError = e; continue; }
-  }
-  throw new Error(`All providers failed: ${lastError?.message || "unknown"}`);
+  throw new Error("All providers failed: " + (lastErr?.message || "unknown"));
 }
 
 function truncate(str: string | null, max: number) {
-  return str && str.length > max ? str.substring(0, max) + "..." : str;
+  if (!str) return null;
+  return str.length > max ? str.substring(0, max) + "..." : str;
 }
 
-async function fetchWithTimeout(url: string, options: any = {}, ms = 5000) {
+async function fetchTimeout(url: string, opts: any = {}, ms = 5000) {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), ms);
-  try { return await fetch(url, { ...options, signal: ctrl.signal }); }
-  finally { clearTimeout(t); }
+  try {
+    return await fetch(url, { ...opts, signal: ctrl.signal });
+  } finally {
+    clearTimeout(t);
+  }
 }
 
-// ─── JS EXECUTION ───
-function executeJsSafely(code: string) {
-  let stdout = "", stderr = "";
+// ============================================================
+// JS EXECUTION
+// ============================================================
+
+function runJs(code: string) {
+  let out = "";
+  let err = "";
   try {
     const sandbox = {
-      console: { log: (...a: any[]) => stdout += a.map(x => typeof x === 'object' ? JSON.stringify(x) : String(x)).join(' ') + '\n' },
-      Math, Date, JSON, Array, Map, Set
+      console: {
+        log: (...args: any[]) => {
+          out += args.map((a) => (typeof a === "object" ? JSON.stringify(a) : String(a))).join(" ") + "\n";
+        },
+      },
+      Math,
+      Date,
+      JSON,
+      Array,
+      Map,
+      Set,
     };
     vm.runInContext(code, vm.createContext(sandbox), { timeout: 3000 });
-  } catch (e: any) { stderr = e.message; }
-  return { stdout, stderr };
+  } catch (e: any) {
+    err = e.message || "Execution error";
+  }
+  return { out, err };
 }
 
-function extractJsCode(text: string) {
+function extractCode(text: string) {
   const m = text.match(/```(?:javascript|js)\s*([\s\S]*?)```/);
   if (m) return m[1].trim();
   const g = text.match(/```\s*([\s\S]*?)```/);
   return g ? g[1].trim() : null;
 }
 
-function backendExecute(code: string) {
+function verifyCode(code: string) {
   try {
-    const { stdout, stderr } = executeJsSafely(code);
-    return { ok: !stderr, stdout, stderr };
-  } catch (e: any) { return { ok: false, stdout: "", stderr: e.message }; }
+    const { out, err } = runJs(code);
+    return { ok: !err, out, err };
+  } catch (e: any) {
+    return { ok: false, out: "", err: e.message };
+  }
 }
 
-// ─── SEARCH HELPERS ───
+// ============================================================
+// SEARCH
+// ============================================================
+
 async function searchWiki(q: string) {
   try {
-    const s = await fetchWithTimeout(`https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(q)}&format=json&origin=*`);
+    const s = await fetchTimeout(`https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(q)}&format=json&origin=*`);
     const d = await s.json();
     if (d.query?.search?.[0]) {
-      const sum = await fetchWithTimeout(`https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(d.query.search[0].title)}`);
+      const sum = await fetchTimeout(`https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(d.query.search[0].title)}`);
       const sd = await sum.json();
       if (sd.extract) return `Wikipedia: ${sd.extract}`;
     }
@@ -101,7 +118,9 @@ async function searchWiki(q: string) {
 
 async function searchDdg(q: string) {
   try {
-    const r = await fetchWithTimeout(`https://api.duckduckgo.com/?q=${encodeURIComponent(q)}&format=json&no_html=1&skip_disambig=1`, { headers: { 'Accept': 'application/json', 'User-Agent': 'CSHubBot/1.0' } });
+    const r = await fetchTimeout(`https://api.duckduckgo.com/?q=${encodeURIComponent(q)}&format=json&no_html=1&skip_disambig=1`, {
+      headers: { Accept: "application/json", "User-Agent": "CSHubBot/1.0" },
+    });
     const d = await r.json();
     if (d.AbstractText) return `DuckDuckGo: ${d.AbstractText}`;
     if (d.RelatedTopics?.[0]?.Text) return `DuckDuckGo: ${d.RelatedTopics[0].Text}`;
@@ -111,107 +130,162 @@ async function searchDdg(q: string) {
 
 async function searchHn(q: string) {
   try {
-    const r = await fetchWithTimeout(`https://hn.algolia.com/api/v1/search?query=${encodeURIComponent(q)}&tags=story&hitsPerPage=2`);
+    const r = await fetchTimeout(`https://hn.algolia.com/api/v1/search?query=${encodeURIComponent(q)}&tags=story&hitsPerPage=2`);
     const d = await r.json();
-    if (d.hits?.length) return `Hacker News: ${d.hits.map((h: any) => h.title).join(' | ')}`;
+    if (d.hits?.length) return `Hacker News: ${d.hits.map((h: any) => h.title).join(" | ")}`;
   } catch {}
   return null;
 }
 
 async function searchSo(q: string) {
   try {
-    const r = await fetchWithTimeout(`https://api.stackexchange.com/2.3/search/advanced?order=desc&sort=relevance&q=${encodeURIComponent(q)}&site=stackoverflow&pagesize=2`);
+    const r = await fetchTimeout(`https://api.stackexchange.com/2.3/search/advanced?order=desc&sort=relevance&q=${encodeURIComponent(q)}&site=stackoverflow&pagesize=2`);
     const d = await r.json();
-    if (d.items?.length) return `StackOverflow: ${d.items.map((i: any) => i.title).join(' | ')}`;
+    if (d.items?.length) return `StackOverflow: ${d.items.map((i: any) => i.title).join(" | ")}`;
   } catch {}
   return null;
 }
 
 async function searchGh(q: string) {
   try {
-    const h: Record<string, string> = { 'Accept': 'application/vnd.github.v3+json' };
-    if (process.env.GITHUB_TOKEN) h['Authorization'] = `token ${process.env.GITHUB_TOKEN}`;
-    const r = await fetchWithTimeout(`https://api.github.com/search/repositories?q=${encodeURIComponent(q)}&sort=stars&order=desc&per_page=2`, { headers: h });
+    const h: Record<string, string> = { Accept: "application/vnd.github.v3+json" };
+    if (process.env.GITHUB_TOKEN) h.Authorization = `token ${process.env.GITHUB_TOKEN}`;
+    const r = await fetchTimeout(`https://api.github.com/search/repositories?q=${encodeURIComponent(q)}&sort=stars&order=desc&per_page=2`, { headers: h });
     const d = await r.json();
-    if (d.items?.length) return `GitHub: ${d.items.map((i: any) => i.full_name).join(' | ')}`;
+    if (d.items?.length) return `GitHub: ${d.items.map((i: any) => i.full_name).join(" | ")}`;
   } catch {}
   return null;
 }
 
 async function searchArxiv(q: string) {
   try {
-    const r = await fetchWithTimeout(`https://export.arxiv.org/api/query?search_query=all:${encodeURIComponent(q)}&max_results=2`);
+    const r = await fetchTimeout(`https://export.arxiv.org/api/query?search_query=all:${encodeURIComponent(q)}&max_results=2`);
     const t = await r.text();
-    const titles = [...t.matchAll(/<title>(.*?)<\/title>/g)].map(m => m[1]).filter(t => t !== "arXiv Query Result");
-    if (titles.length) return `arXiv Papers: ${titles.join(' | ')}`;
+    const titles = [...t.matchAll(/<title>(.*?)<\/title>/g)].map((m) => m[1]).filter((t) => t !== "arXiv Query Result");
+    if (titles.length) return `arXiv Papers: ${titles.join(" | ")}`;
   } catch {}
   return null;
 }
 
-// ─── MAIN ROUTE ───
+// ============================================================
+// MAIN ROUTE
+// ============================================================
+
 export async function POST(req: Request) {
   try {
     const session = await getServerSession(authOptions);
     if (!session) return new Response(JSON.stringify({ error: "Unauthorized" }), { status: 401 });
 
-    const body = await req.json();
-    const { messages, conversationId } = body;
+    const { messages, conversationId } = await req.json();
     const userPrompt = messages[messages.length - 1].content;
-    const lowerUserPrompt = userPrompt.toLowerCase();
+    const lowerPrompt = userPrompt.toLowerCase();
 
-    let currentConvId = conversationId;
-    if (!currentConvId) {
-      const nc = await prisma.conversation.create({ data: { userId: session.user.id, title: userPrompt.substring(0, 30) + "..." } });
-      currentConvId = nc.id;
+    let convId = conversationId;
+    if (!convId) {
+      const nc = await prisma.conversation.create({
+        data: { userId: session.user.id, title: userPrompt.substring(0, 30) + "..." },
+      });
+      convId = nc.id;
     }
 
-    await prisma.message.create({ data: { conversationId: currentConvId, role: "user", content: userPrompt } });
+    await prisma.message.create({
+      data: { conversationId: convId, role: "user", content: userPrompt },
+    });
 
-    // ─── SEARCH ───
-    const isSearch = lowerUserPrompt.startsWith("search for") || lowerUserPrompt.includes("search the web") || lowerUserPrompt.startsWith("look up") || lowerUserPrompt.startsWith("search ");
+    // --- SEARCH ---
+    const isSearch =
+      lowerPrompt.startsWith("search for") ||
+      lowerPrompt.includes("search the web") ||
+      lowerPrompt.startsWith("look up") ||
+      lowerPrompt.startsWith("search ");
+
     if (isSearch) {
       const query = userPrompt.replace(/(search for|search the web for|look up|search)/i, "").trim().replace(/["']/g, "").trim();
-      const encoder = new TextEncoder();
-      return new Response(new ReadableStream({
-        async start(controller) {
-          const send = (s: string) => controller.enqueue(encoder.encode(`data: ${JSON.stringify({ searchStep: s })}\n\n`));
-          send("Wikipedia"); send("DuckDuckGo"); send("Hacker News"); send("StackOverflow"); send("GitHub"); send("arXiv");
+      const enc = new TextEncoder();
+
+      const stream = new ReadableStream({
+        async start(ctrl) {
+          const step = (s: string) => ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ searchStep: s })}\n\n`));
+          step("Wikipedia");
+          step("DuckDuckGo");
+          step("Hacker News");
+          step("StackOverflow");
+          step("GitHub");
+          step("arXiv");
 
           const [wiki, ddg, hn, so, gh, arxiv] = await Promise.all([
-            searchWiki(query), searchDdg(query), searchHn(query),
-            searchSo(query), searchGh(query), searchArxiv(query)
+            searchWiki(query),
+            searchDdg(query),
+            searchHn(query),
+            searchSo(query),
+            searchGh(query),
+            searchArxiv(query),
           ]);
 
           let ctx = "";
-          [wiki, ddg, hn, so, gh, arxiv].forEach(r => { if (r) ctx += `${truncate(r, 300)}\n\n`; });
+          if (wiki) ctx += `${truncate(wiki, 300)}\n\n`;
+          if (ddg) ctx += `${truncate(ddg, 300)}\n\n`;
+          if (hn) ctx += `${truncate(hn, 300)}\n\n`;
+          if (so) ctx += `${truncate(so, 300)}\n\n`;
+          if (gh) ctx += `${truncate(gh, 300)}\n\n`;
+          if (arxiv) ctx += `${truncate(arxiv, 300)}\n\n`;
 
           let aiText = "";
           if (ctx) {
             try {
-              const { result } = await streamWithFallback(m => ({ model: m, messages: [{ role: "system", content: `Searched 6 sources for "${query}".\n\n${ctx}\n\nSummarize and cite.` }, { role: "user", content: query }], temperature: 0.3, maxTokens: 1000, maxRetries: 3 }));
-              for await (const d of result.textStream) { aiText += d; controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: d } }] })}\n\n`)); }
+              const res = await callAI(
+                [
+                  { role: "system", content: `You searched 6 sources for "${query}".\n\n${ctx}\n\nSummarize and cite sources.` },
+                  { role: "user", content: query },
+                ],
+                0.3,
+                1000
+              );
+              for await (const d of res.textStream) {
+                aiText += d;
+                ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: d } }] })}\n\n`));
+              }
             } catch {
               aiText = "*(All AI providers unavailable)*";
-              controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: aiText } }] })}\n\n`));
+              ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: aiText } }] })}\n\n`));
             }
           } else {
             aiText = `No results for "${query}".`;
-            controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: aiText } }] })}\n\n`));
+            ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: aiText } }] })}\n\n`));
           }
-          controller.enqueue(encoder.encode('data: [DONE]\n\n')); controller.close();
-          try { await prisma.message.create({ data: { conversationId: currentConvId, role: "assistant", content: aiText } }); await prisma.conversation.update({ where: { id: currentConvId }, data: { updatedAt: new Date() } }); } catch (e) { console.error(e); }
-        }
-      }), { headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' } });
+
+          ctrl.enqueue(enc.encode("data: [DONE]\n\n"));
+          ctrl.close();
+
+          try {
+            await prisma.message.create({ data: { conversationId: convId, role: "assistant", content: aiText } });
+            await prisma.conversation.update({ where: { id: convId }, data: { updatedAt: new Date() } });
+          } catch (e) {
+            console.error("DB error:", e);
+          }
+        },
+      });
+
+      return new Response(stream, { headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" } });
     }
 
-    // ─── CODING: 4-PHASE ACT ───
-    const isCoding = lowerUserPrompt.includes("code") || lowerUserPrompt.includes("algorithm") || lowerUserPrompt.includes("solve") || lowerUserPrompt.includes("function") || lowerUserPrompt.includes("write a") || lowerUserPrompt.includes("dp") || lowerUserPrompt.includes("array") || lowerUserPrompt.includes("tree") || lowerUserPrompt.includes("graph");
+    // --- CODING ---
+    const isCoding =
+      lowerPrompt.includes("code") ||
+      lowerPrompt.includes("algorithm") ||
+      lowerPrompt.includes("solve") ||
+      lowerPrompt.includes("function") ||
+      lowerPrompt.includes("write a") ||
+      lowerPrompt.includes("dp") ||
+      lowerPrompt.includes("array") ||
+      lowerPrompt.includes("tree") ||
+      lowerPrompt.includes("graph");
 
     if (isCoding) {
-      const encoder = new TextEncoder();
+      const enc = new TextEncoder();
       const MAX_ROUNDS = 2;
 
-      const REASON_PROMPT = `You are an elite software engineer analyzing a coding problem.
+      const REASON = `You are an elite software engineer analyzing a coding problem.
 Analyze concisely:
 - Exact inputs, outputs, constraints
 - If sequence constraints exist: "State design must track last move. dp[i] alone is NEVER enough. Use dp[i][last_move][consecutive_count]."
@@ -219,139 +293,210 @@ Analyze concisely:
 - Time/space complexity
 Output ONLY analysis. NO code.`;
 
-      const EXECUTE_PROMPT = `Based on the analysis, write JavaScript solution.
+      const EXECUTE = `Based on the analysis, write JavaScript solution.
 - Single named function
 - Include console.log test cases at bottom
 Output ONLY the code block.`;
 
-      const CRITIC_PROMPT = `You are a strict code reviewer. Analyze code vs analysis.
+      const CRITIC = `You are a strict code reviewer. Analyze code vs analysis.
 - Does code implement the described state design?
 - Are ALL constraints enforced?
 Score 0-100. Output ONLY score + brief critique.`;
 
-      return new Response(new ReadableStream({
-        async start(controller) {
-          let recentMessages = messages.slice(-4).map((m: any) => ({
+      const stream = new ReadableStream({
+        async start(ctrl) {
+          let recent = messages.slice(-4).map((m: any) => ({
             role: m.role === "assistant" ? "assistant" : "user",
-            content: m.content.includes("data:image") ? "[Image]" : m.content
+            content: m.content.includes("data:image") ? "[Image]" : m.content,
           }));
 
-          let codingFullText = "";
+          let full = "";
           let lastCode = "";
-          let verified = false;
-          let roundsUsed = 0;
+          let ok = false;
+          let rounds = 0;
 
           try {
             for (let r = 1; r <= MAX_ROUNDS; r++) {
-              roundsUsed = r;
+              rounds = r;
 
               // REASON
-              const reasonHeader = `\n🧠 **REASONING (Round ${r})...**\n\n`;
-              controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: reasonHeader } }] })}\n\n`));
-              const reasonResult = await streamWithFallback(m => ({ model: m, messages: [{ role: "system", content: REASON_PROMPT }, ...recentMessages], temperature: 0.2, maxTokens: 800, maxRetries: 3 }));
-              let reasonText = "";
-              for await (const d of reasonResult.result.textStream) { reasonText += d; controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: d } }] })}\n\n`)); }
-              codingFullText += reasonHeader + reasonText;
+              const rh = `\n🧠 **REASONING (Round ${r})...**\n\n`;
+              ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: rh } }] })}\n\n`));
+              const reasonRes = await callAI([{ role: "system", content: REASON }, ...recent], 0.2, 800);
+              let reasonTxt = "";
+              for await (const d of reasonRes.textStream) {
+                reasonTxt += d;
+                ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: d } }] })}\n\n`));
+              }
+              full += rh + reasonTxt;
 
               // EXECUTE
-              const executeHeader = `\n\n💻 **CODING...**\n\n`;
-              controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: executeHeader } }] })}\n\n`));
-              const executeResult = await streamWithFallback(m => ({ model: m, messages: [{ role: "system", content: EXECUTE_PROMPT }, ...recentMessages, { role: "assistant", content: reasonText }, { role: "user", content: "Write the code now." }], temperature: 0.1, maxTokens: 1200, maxRetries: 3 }));
-              let executeText = "";
-              for await (const d of executeResult.result.textStream) { executeText += d; controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: d } }] })}\n\n`)); }
-              codingFullText += executeHeader + executeText;
+              const eh = `\n\n💻 **CODING...**\n\n`;
+              ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: eh } }] })}\n\n`));
+              const execRes = await callAI(
+                [{ role: "system", content: EXECUTE }, ...recent, { role: "assistant", content: reasonTxt }, { role: "user", content: "Write the code now." }],
+                0.1,
+                1200
+              );
+              let execTxt = "";
+              for await (const d of execRes.textStream) {
+                execTxt += d;
+                ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: d } }] })}\n\n`));
+              }
+              full += eh + execTxt;
 
               // CRITIC
-              const criticHeader = `\n\n🕵️ **CRITIQUING...**\n\n`;
-              controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: criticHeader } }] })}\n\n`));
-              const criticResult = await streamWithFallback(m => ({ model: m, messages: [{ role: "system", content: CRITIC_PROMPT }, ...recentMessages, { role: "assistant", content: reasonText }, { role: "assistant", content: executeText }, { role: "user", content: "Critique this code." }], temperature: 0.2, maxTokens: 600, maxRetries: 3 }));
-              let criticText = "";
-              for await (const d of criticResult.result.textStream) { criticText += d; controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: d } }] })}\n\n`)); }
-              codingFullText += criticHeader + criticText;
+              const ch = `\n\n🕵️ **CRITIQUING...**\n\n`;
+              ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: ch } }] })}\n\n`));
+              const criticRes = await callAI(
+                [{ role: "system", content: CRITIC }, ...recent, { role: "assistant", content: reasonTxt }, { role: "assistant", content: execTxt }, { role: "user", content: "Critique this code." }],
+                0.2,
+                600
+              );
+              let criticTxt = "";
+              for await (const d of criticRes.textStream) {
+                criticTxt += d;
+                ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: d } }] })}\n\n`));
+              }
+              full += ch + criticTxt;
 
               // VERIFY
-              const code = extractJsCode(executeText);
+              const code = extractCode(execTxt);
               if (!code) {
-                const noCodeMsg = `\n\n⚠️ No code block found. Retrying...\n`;
-                codingFullText += noCodeMsg; controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: noCodeMsg } }] })}\n\n`)); continue;
+                const msg = `\n\n⚠️ No code block found. Retrying...\n`;
+                full += msg;
+                ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: msg } }] })}\n\n`));
+                continue;
               }
 
-              const execResult = backendExecute(code);
-              if (execResult.ok) {
-                verified = true;
-                const verifiedMsg = `\n\n✅ **BACKEND-VERIFIED** — Round ${r} success. Output: \`${execResult.stdout.trim()}\``;
-                codingFullText += verifiedMsg; controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: verifiedMsg } }] })}\n\n`)); break;
+              const result = verifyCode(code);
+              if (result.ok) {
+                ok = true;
+                const msg = `\n\n✅ **BACKEND-VERIFIED** — Round ${r} success. Output: \`${result.out.trim()}\``;
+                full += msg;
+                ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: msg } }] })}\n\n`));
+                break;
               }
 
-              const failMsg = `\n\n❌ **VERIFICATION FAILED:** \`${execResult.stderr}\`\n🔄 Re-analyzing...\n`;
-              codingFullText += failMsg; controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: failMsg } }] })}\n\n`));
+              const msg = `\n\n❌ **VERIFICATION FAILED:** \`${result.err}\`\n🔄 Re-analyzing...\n`;
+              full += msg;
+              ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: msg } }] })}\n\n`));
 
               if (code === lastCode) {
-                const stuckMsg = `\n\n⚠️ **Stop condition:** Identical code. Halting.`;
-                codingFullText += stuckMsg; controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: stuckMsg } }] })}\n\n`)); break;
+                const stuck = `\n\n⚠️ **Stop condition:** Identical code. Halting.`;
+                full += stuck;
+                ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: stuck } }] })}\n\n`));
+                break;
               }
               lastCode = code;
-              recentMessages = [...recentMessages, { role: "assistant", content: reasonText + "\n" + executeText }, { role: "user", content: `Your code failed:\n\n${execResult.stderr}\n\nFix it.` }];
+              recent = [...recent, { role: "assistant", content: reasonTxt + "\n" + execTxt }, { role: "user", content: `Your code failed:\n\n${result.err}\n\nFix it.` }];
             }
 
-            if (!verified) {
-              const unverifiedMsg = `\n\n⚠️ **Could not verify** after ${roundsUsed} attempts. Try rephrasing.`;
-              codingFullText += unverifiedMsg; controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: unverifiedMsg } }] })}\n\n`));
+            if (!ok) {
+              const msg = `\n\n⚠️ **Could not verify** after ${rounds} attempts. Try rephrasing.`;
+              full += msg;
+              ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: msg } }] })}\n\n`));
             }
           } catch (e: any) {
             console.error("Stream error:", e);
-            const errMsg = "\n\n*(System: Stream interrupted. Please try again.)*";
-            if (!codingFullText.includes(errMsg)) { controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: errMsg } }] })}\n\n`)); codingFullText += errMsg; }
+            const msg = "\n\n*(System: Stream interrupted. Please try again.)*";
+            if (!full.includes(msg)) {
+              ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: msg } }] })}\n\n`));
+              full += msg;
+            }
           } finally {
-            controller.enqueue(encoder.encode('data: [DONE]\n\n')); controller.close();
-            try { await prisma.message.create({ data: { conversationId: currentConvId, role: "assistant", content: codingFullText } }); await prisma.conversation.update({ where: { id: currentConvId }, data: { updatedAt: new Date() } }); } catch (e) { console.error(e); }
+            ctrl.enqueue(enc.encode("data: [DONE]\n\n"));
+            ctrl.close();
+            try {
+              await prisma.message.create({ data: { conversationId: convId, role: "assistant", content: full } });
+              await prisma.conversation.update({ where: { id: convId }, data: { updatedAt: new Date() } });
+            } catch (e) {
+              console.error("DB error:", e);
+            }
           }
-        }
-      }), { headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' } });
+        },
+      });
+
+      return new Response(stream, { headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" } });
     }
 
-    // ─── NORMAL CHAT ───
-    const systemPrompt = `You are CS Hub AI, built by Lewis Einstein (AI/ML Engineer) at Kibabii University. Answer clearly in markdown. Only output action commands when EXPLICITLY asked:
+    // --- NORMAL CHAT ---
+    const SYSTEM = `You are CS Hub AI, built by Lewis Einstein (AI/ML Engineer) at Kibabii University. Answer clearly in markdown. Only output action commands when EXPLICITLY asked:
 [ACTION:CREATE_FLASHCARD] Front: <text> | Back: <text>
 [ACTION:SAVE_NOTE] Title: <text> | Content: <text>
 [ACTION:CREATE_ASSIGNMENT] Title: <text> | Due: <YYYY-MM-DDTHH:MM:SS>`;
 
-    const aiMessages = [{ role: "system", content: systemPrompt }, ...messages.slice(-6).map((m: any) => ({ role: m.role === "assistant" ? "assistant" : "user", content: m.content.includes("data:image") ? "[Image]" : m.content }))];
+    const chatMsgs = [
+      { role: "system", content: SYSTEM },
+      ...messages.slice(-6).map((m: any) => ({
+        role: m.role === "assistant" ? "assistant" : "user",
+        content: m.content.includes("data:image") ? "[Image]" : m.content,
+      })),
+    ];
 
-    let chatStreamResult;
+    let chatRes;
     try {
-      const { result } = await streamWithFallback(m => ({ model: m, messages: aiMessages, temperature: 0.5, maxTokens: 2000, maxRetries: 3 }));
-      chatStreamResult = result;
+      chatRes = await callAI(chatMsgs, 0.5, 2000);
     } catch (e: any) {
       const enc = new TextEncoder();
-      return new Response(new ReadableStream({ start(c) { const m = `*(All AI providers unavailable: ${e.message})*`; c.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: m } }] })}\n\n`)); c.enqueue(enc.encode('data: [DONE]\n\n')); c.close(); } }), { headers: { 'Content-Type': 'text/event-stream' } });
+      return new Response(
+        new ReadableStream({
+          start(c) {
+            const m = `*(All AI providers unavailable: ${e.message})*`;
+            c.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: m } }] })}\n\n`));
+            c.enqueue(enc.encode("data: [DONE]\n\n"));
+            c.close();
+          },
+        }),
+        { headers: { "Content-Type": "text/event-stream" } }
+      );
     }
 
-    const chatEncoder = new TextEncoder();
-    let chatFullText = "";
-    return new Response(new ReadableStream({
-      async start(controller) {
-        for await (const d of chatStreamResult.textStream) { chatFullText += d; controller.enqueue(chatEncoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: d } }] })}\n\n`)); }
-        controller.enqueue(chatEncoder.encode('data: [DONE]\n\n')); controller.close();
+    const enc = new TextEncoder();
+    let chatTxt = "";
 
-        const lt = chatFullText.toLowerCase();
+    const stream = new ReadableStream({
+      async start(ctrl) {
+        for await (const d of chatRes.textStream) {
+          chatTxt += d;
+          ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: d } }] })}\n\n`));
+        }
+        ctrl.enqueue(enc.encode("data: [DONE]\n\n"));
+        ctrl.close();
+
+        const lt = chatTxt.toLowerCase();
         try {
-          if ((lt.includes("action:create_flashcard") || (lowerUserPrompt.includes("create") && lowerUserPrompt.includes("flashcard"))) && !chatFullText.includes("[SAVED:FLASHCARD]")) {
-            const m = chatFullText.match(/Front:\s*(.*?)\s*\|\s*Back:\s*(.*)/i);
-            if (m) { await prisma.flashcard.create({ data: { front: m[1].trim(), back: m[2].trim(), userId: session.user.id } }); chatFullText += "\n[SAVED:FLASHCARD]"; }
-          } else if ((lt.includes("action:save_note") || (lowerUserPrompt.includes("save") && lowerUserPrompt.includes("note"))) && !chatFullText.includes("[SAVED:NOTE]")) {
-            const m = chatFullText.match(/Title:\s*(.*?)\s*\|\s*Content:\s*(.*)/i);
-            if (m) { await prisma.note.create({ data: { title: m[1].trim(), content: m[2].trim(), userId: session.user.id } }); chatFullText += "\n[SAVED:NOTE]"; }
-          } else if ((lt.includes("action:create_assignment") || (lowerUserPrompt.includes("add") && lowerUserPrompt.includes("assignment"))) && !chatFullText.includes("[SAVED:ASSIGNMENT]")) {
-            const m = chatFullText.match(/Title:\s*(.*?)\s*\|\s*Due:\s*(.*)/i);
-            if (m) { const dd = new Date(m[2].trim()); if (!isNaN(dd.getTime())) { await prisma.assignment.create({ data: { title: m[1].trim(), dueDate: dd, userId: session.user.id } }); chatFullText += "\n[SAVED:ASSIGNMENT]"; } }
+          if ((lt.includes("action:create_flashcard") || (lowerPrompt.includes("create") && lowerPrompt.includes("flashcard"))) && !chatTxt.includes("[SAVED:FLASHCARD]")) {
+            const m = chatTxt.match(/Front:\s*(.*?)\s*\|\s*Back:\s*(.*)/i);
+            if (m) {
+              await prisma.flashcard.create({ data: { front: m[1].trim(), back: m[2].trim(), userId: session.user.id } });
+              chatTxt += "\n[SAVED:FLASHCARD]";
+            }
+          } else if ((lt.includes("action:save_note") || (lowerPrompt.includes("save") && lowerPrompt.includes("note"))) && !chatTxt.includes("[SAVED:NOTE]")) {
+            const m = chatTxt.match(/Title:\s*(.*?)\s*\|\s*Content:\s*(.*)/i);
+            if (m) {
+              await prisma.note.create({ data: { title: m[1].trim(), content: m[2].trim(), userId: session.user.id } });
+              chatTxt += "\n[SAVED:NOTE]";
+            }
+          } else if ((lt.includes("action:create_assignment") || (lowerPrompt.includes("add") && lowerPrompt.includes("assignment"))) && !chatTxt.includes("[SAVED:ASSIGNMENT]")) {
+            const m = chatTxt.match(/Title:\s*(.*?)\s*\|\s*Due:\s*(.*)/i);
+            if (m) {
+              const dd = new Date(m[2].trim());
+              if (!isNaN(dd.getTime())) {
+                await prisma.assignment.create({ data: { title: m[1].trim(), dueDate: dd, userId: session.user.id } });
+                chatTxt += "\n[SAVED:ASSIGNMENT]";
+              }
+            }
           }
-          await prisma.message.create({ data: { conversationId: currentConvId, role: "assistant", content: chatFullText } });
-          await prisma.conversation.update({ where: { id: currentConvId }, data: { updatedAt: new Date() } });
-        } catch (e) { console.error(e); }
-      }
-    }), { headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' } });
+          await prisma.message.create({ data: { conversationId: convId, role: "assistant", content: chatTxt } });
+          await prisma.conversation.update({ where: { id: convId }, data: { updatedAt: new Date() } });
+        } catch (e) {
+          console.error("DB error:", e);
+        }
+      },
+    });
 
+    return new Response(stream, { headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" } });
   } catch (error: any) {
     console.error("API Error:", error);
     return new Response(JSON.stringify({ error: "Internal Server Error", details: error.message }), { status: 500 });
