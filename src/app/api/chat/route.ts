@@ -224,9 +224,11 @@ print(json.dumps({"trials": ${trials}, "mismatches": len(mismatches), "mismatche
 
 // FIX: added a timeout (was completely missing before — the single
 // biggest suspect for "unable to fetch response" given the multi-round
-// loop this function sits inside). Also switched the hardcoded
-// "llama-3.1-8b-instant" to an env-configurable GLM-5.2 model id, and
-// added a clear error if GROQ_API_KEY isn't set instead of silently
+// loop this function sits inside). Also switched to a model that's
+// actually hosted on Groq (openai/gpt-oss-120b — confirmed via Groq's
+// live model list, since "glm-5.2" returned a 404 model_not_found
+// error, and GLM-5.2 turns out not to be available on Groq at all).
+// Added a clear error if GROQ_API_KEY isn't set instead of silently
 // sending "Bearer undefined".
 async function callGroq(messages: any[]) {
   if (!process.env.GROQ_API_KEY) {
@@ -239,9 +241,13 @@ async function callGroq(messages: any[]) {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${process.env.GROQ_API_KEY}` },
       body: JSON.stringify({
-        // IMPORTANT: verify this exact model id in your Groq console/docs.
-        // Set GROQ_GLM_MODEL in your environment to override if needed.
-        model: process.env.GROQ_GLM_MODEL || "glm-5.2",
+        // Switched from "glm-5.2" (confirmed via Groq's live model list to
+        // NOT exist on Groq — that's what caused the 404 model_not_found
+        // error) to openai/gpt-oss-120b, which IS hosted on Groq and
+        // supports tool calling + reasoning, matching what this
+        // execute_code / stress_test_code pipeline needs.
+        // Override via GROQ_GLM_MODEL env var if you switch models later.
+        model: process.env.GROQ_GLM_MODEL || "openai/gpt-oss-120b",
         messages,
         tools: TOOLS,
         tool_choice: "auto",
