@@ -85,7 +85,10 @@ function executeJsSafely(code: string): { stdout: string; stderr: string } {
       },
       Math: Math,
       Date: Date,
-      JSON: JSON
+      JSON: JSON,
+      Array: Array,
+      Map: Map,
+      Set: Set
     };
     
     const context = vm.createContext(sandbox);
@@ -97,10 +100,10 @@ function executeJsSafely(code: string): { stdout: string; stderr: string } {
 }
 
 // ============================================================
-// ACT STATE MACHINE (REASON → EXECUTE → VERIFY)
+// 1-CALL ACT LOOP (REASON + EXECUTE + CRITIQUE)
 // ============================================================
 
-const MAX_ACT_ROUNDS = 2;
+const MAX_ROUNDS = 2;
 
 function extractJsCode(text: string): string | null {
   const match = text.match(/```javascript\s*([\s\S]*?)```/) || text.match(/```\s*([\s\S]*?)```/);
@@ -121,30 +124,6 @@ function backendExecute(code: string, funcName: string): { ok: boolean; stdout: 
   } catch (e: any) {
     return { ok: false, stdout: "", stderr: `Execution error: ${e.message}` };
   }
-}
-
-// Stream a single AI state
-async function streamAIState(
-  systemPrompt: string,
-  messages: any[],
-  temperature: number,
-  controller: any,
-  encoder: TextEncoder
-): Promise<string> {
-  const { result } = await streamWithFallback((model) => ({
-    model,
-    messages: [{ role: "system", content: systemPrompt }, ...messages],
-    temperature,
-    maxTokens: 2000,
-    maxRetries: 3, 
-  }));
-
-  let text = "";
-  for await (const delta of result.textStream) {
-    text += delta;
-    controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: delta } }] })}\n\n`));
-  }
-  return text;
 }
 
 // ============================================================
@@ -292,7 +271,7 @@ export async function POST(req: Request) {
       return new Response(searchStream, { headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' } });
     }
 
-    // --- ACT STATE MACHINE (CODING QUESTIONS) ---
+    // --- 1-CALL ACT LOOP (CODING QUESTIONS) ---
     const isCodingQuestion = lowerUserPrompt.includes("code") || lowerUserPrompt.includes("algorithm") || lowerUserPrompt.includes("trace") || lowerUserPrompt.includes("solve") || lowerUserPrompt.includes("string") || lowerUserPrompt.includes("array") || lowerUserPrompt.includes("tree") || lowerUserPrompt.includes("graph") || lowerUserPrompt.includes("dp");
 
     if (isCodingQuestion) {
@@ -302,20 +281,18 @@ export async function POST(req: Request) {
         return { role: m.role === "assistant" ? "assistant" : "user", content: safeContent };
       });
 
-      // CLAUDE'S TRAP-SETTER & REBUILDER PROMPTS
-      const REASON_PROMPT = `You are an expert software engineer analyzing a coding problem.
-Before writing code, you MUST answer these questions:
-1. What are the exact inputs, outputs, and constraints?
-2. If there is a sequence constraint (e.g., "no 3 consecutive moves", "cannot do X twice in a row"), does the state track the last move? Position alone (\`dp[i]\`) is NEVER enough for move-sequence constraints. You MUST use a multi-dimensional state (e.g., \`dp[i][last_move]\`).
-3. What is the step-by-step algorithmic plan?
-4. What is the time and space complexity?
-DO NOT write any code in this stage. Only provide analysis and a plan.`;
+      // CLAUDE'S TRAP-SETTER + REBUILDER IN 1 PROMPT
+      const ACT_PROMPT = `You are an elite AI coding assistant. You must follow this EXACT format:
 
-      const EXECUTE_PROMPT = `Based on your analysis and plan, write the JavaScript solution.
-- If your plan identified a need for a multi-dimensional state (e.g., \`dp[i][last_move]\`), you MUST implement it. Do NOT fall back to a 1D array.
-- Wrap your solution in a single named function.
-- Use console.log() for any test output.
-- Do NOT write a verification section.`;
+1. **REASONING**: Analyze the problem.
+   - If there are sequence constraints (e.g., "no 3 consecutive moves", "cannot do X twice in a row"), you MUST state: "State design must track the last move. Position alone (dp[i]) is NEVER enough. I will use dp[i][last_move]."
+   - Outline the algorithm and complexity.
+2. **CODE**: Write the JavaScript solution.
+   - Wrap your solution in a single named function.
+   - Use console.log() for any test output.
+3. **CRITIQUE**: Briefly verify your own state design handles the constraints.
+
+Begin!`;
 
       const encoder = new TextEncoder();
       let fullText = "";
@@ -331,29 +308,32 @@ DO NOT write any code in this stage. Only provide analysis and a plan.`;
           }, 5000);
 
           try {
-            for (let round = 1; round <= MAX_ACT_ROUNDS; round++) {
+            for (let round = 1; round <= MAX_ROUNDS; round++) {
               roundsUsed = round;
 
-              // ── STATE 1: REASON (ANALYZE + PLAN) ──
-              const reasonHeader = `\n🧠 **REASONING (Round ${round})...**\n\n`;
-              fullText += reasonHeader;
-              controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: reasonHeader } }] })}\n\n`));
+              const header = `\n🧠 **ACT ROUND ${round}...**\n\n`;
+              fullText += header;
+              controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: header } }] })}\n\n`));
 
-              const reasonText = await streamAIState(REASON_PROMPT, conversationHistory, 0.2, controller, encoder);
-              conversationHistory.push({ role: "assistant", content: reasonText });
-              fullText += reasonText;
+              // SINGLE API CALL FOR REASON + EXECUTE + CRITIQUE
+              const { result } = await streamWithFallback((model) => ({
+                model,
+                messages: [{ role: "system", content: ACT_PROMPT }, ...conversationHistory],
+                temperature: 0.1,
+                maxTokens: 2000,
+                maxRetries: 3, 
+              }));
 
-              // ── STATE 2: EXECUTE ──
-              const executeHeader = `\n\n💻 **CODING...**\n\n`;
-              fullText += executeHeader;
-              controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: executeHeader } }] })}\n\n`));
+              let aiText = "";
+              for await (const delta of result.textStream) {
+                aiText += delta;
+                controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: delta } }] })}\n\n`));
+              }
+              conversationHistory.push({ role: "assistant", content: aiText });
+              fullText += aiText;
 
-              const executeText = await streamAIState(EXECUTE_PROMPT, conversationHistory, 0.1, controller, encoder);
-              conversationHistory.push({ role: "assistant", content: executeText });
-              fullText += executeText;
-
-              // ── STATE 3: VERIFY ──
-              const code = extractJsCode(executeText);
+              // BACKEND VERIFICATION
+              const code = extractJsCode(aiText);
               if (!code) {
                 const noCodeMsg = `\n\n⚠️ No code block found. Retrying...\n`;
                 fullText += noCodeMsg;
@@ -381,12 +361,12 @@ DO NOT write any code in this stage. Only provide analysis and a plan.`;
                 break;
               }
 
-              // Verification failed — feed REAL error back and loop to REASON
+              // Verification failed — feed REAL error back
               const failMsg = `\n\n❌ **VERIFICATION FAILED:** \`${execResult.stderr}\`\n🔄 Re-analyzing the problem...\n`;
               fullText += failMsg;
               controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: failMsg } }] })}\n\n`));
 
-              // Stop condition: if code is identical to last round, stop (stuck in loop)
+              // Stop condition: if code is identical to last round, stop
               if (code === lastCode) {
                 const stuckMsg = `\n\n⚠️ **Stop condition triggered:** Code is identical to previous attempt. Stopping to prevent infinite loop.`;
                 fullText += stuckMsg;
