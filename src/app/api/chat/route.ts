@@ -269,7 +269,7 @@ export async function POST(req: Request) {
       return new Response(stream, { headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" } });
     }
 
-    // --- CODING ---
+    // --- CODING: FAST 4-PHASE ---
     const isCoding =
       lowerPrompt.includes("code") ||
       lowerPrompt.includes("algorithm") ||
@@ -283,29 +283,20 @@ export async function POST(req: Request) {
 
     if (isCoding) {
       const enc = new TextEncoder();
-      const MAX_ROUNDS = 2;
 
-      const REASON = `You are an elite software engineer analyzing a coding problem.
-Analyze concisely:
-- Exact inputs, outputs, constraints
-- If sequence constraints exist: "State design must track last move. dp[i] alone is NEVER enough. Use dp[i][last_move][consecutive_count]."
-- Step-by-step algorithmic plan
+      const REASON = `You are an elite software engineer. Analyze this coding problem concisely:
+- Inputs, outputs, constraints
+- State design (if sequence constraints: dp[i][last_move][consecutive_count])
+- Algorithm plan
 - Time/space complexity
-Output ONLY analysis. NO code.`;
+NO CODE. Just analysis.`;
 
-      const EXECUTE = `Based on the analysis, write JavaScript solution.
+      const EXECUTE = `Write the JavaScript solution based on the analysis above.
 - Single named function
-- Include console.log test cases at bottom
-Output ONLY the code block.`;
+- console.log test cases at bottom
+Output ONLY code block.`;
 
-      const CRITIC = `You are a strict code reviewer. You MUST:
-1. Trace through the code mentally with the FIRST test case provided in the console.log statements
-2. Compare what the code outputs vs what it SHOULD output
-3. Check if ALL constraints from the problem are actually enforced in the code (not just mentioned in analysis)
-4. If the code would produce the wrong answer, say EXACTLY what the wrong output is and what the correct output should be
-
-Score 0-100. If the code produces wrong answers, score MUST be below 40.
-Output ONLY: "Score: X/100" followed by your critique.`;
+      const CRITIC = `Review this code briefly. Does it implement the analysis? Are constraints enforced? Score 0-100. Output: "Score: X/100 - brief note"`;
 
       const stream = new ReadableStream({
         async start(ctrl) {
@@ -318,15 +309,16 @@ Output ONLY: "Score: X/100" followed by your critique.`;
           let lastCode = "";
           let ok = false;
           let rounds = 0;
+          const MAX_ROUNDS = 2;
 
           try {
             for (let r = 1; r <= MAX_ROUNDS; r++) {
               rounds = r;
 
-              // REASON
-              const rh = `\n🧠 **REASONING (Round ${r})...**\n\n`;
+              // REASON (fast, 400 tokens)
+              const rh = `\n🧠 **REASONING...**\n\n`;
               ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: rh } }] })}\n\n`));
-              const reasonRes = await callAI([{ role: "system", content: REASON }, ...recent], 0.2, 800);
+              const reasonRes = await callAI([{ role: "system", content: REASON }, ...recent], 0.2, 400);
               let reasonTxt = "";
               for await (const d of reasonRes.textStream) {
                 reasonTxt += d;
@@ -334,13 +326,13 @@ Output ONLY: "Score: X/100" followed by your critique.`;
               }
               full += rh + reasonTxt;
 
-              // EXECUTE
+              // EXECUTE (fast, 600 tokens)
               const eh = `\n\n💻 **CODING...**\n\n`;
               ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: eh } }] })}\n\n`));
               const execRes = await callAI(
-                [{ role: "system", content: EXECUTE }, ...recent, { role: "assistant", content: reasonTxt }, { role: "user", content: "Write the code now." }],
+                [{ role: "system", content: EXECUTE }, ...recent, { role: "assistant", content: reasonTxt }, { role: "user", content: "Write code." }],
                 0.1,
-                1200
+                600
               );
               let execTxt = "";
               for await (const d of execRes.textStream) {
@@ -349,13 +341,13 @@ Output ONLY: "Score: X/100" followed by your critique.`;
               }
               full += eh + execTxt;
 
-              // CRITIC
+              // CRITIC (fast, 200 tokens)
               const ch = `\n\n🕵️ **CRITIQUING...**\n\n`;
               ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: ch } }] })}\n\n`));
               const criticRes = await callAI(
-                [{ role: "system", content: CRITIC }, ...recent, { role: "assistant", content: reasonTxt }, { role: "assistant", content: execTxt }, { role: "user", content: "Critique this code." }],
+                [{ role: "system", content: CRITIC }, ...recent, { role: "assistant", content: reasonTxt }, { role: "assistant", content: execTxt }, { role: "user", content: "Review." }],
                 0.2,
-                600
+                200
               );
               let criticTxt = "";
               for await (const d of criticRes.textStream) {
@@ -367,7 +359,7 @@ Output ONLY: "Score: X/100" followed by your critique.`;
               // VERIFY
               const code = extractCode(execTxt);
               if (!code) {
-                const msg = `\n\n⚠️ No code block found. Retrying...\n`;
+                const msg = `\n\n⚠️ No code found. Retrying...\n`;
                 full += msg;
                 ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: msg } }] })}\n\n`));
                 continue;
@@ -375,60 +367,44 @@ Output ONLY: "Score: X/100" followed by your critique.`;
 
               const result = verifyCode(code);
               if (result.ok) {
-                // TEST: Verify the output is actually correct by running again
-                const testHeader = `\n\n🧪 **TESTING OUTPUT...**\n\n`;
-                ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: testHeader } }] })}\n\n`));
-                full += testHeader;
+                // Code runs! Show output. Don't auto-retry for wrong answers.
+                const outMsg = `\n\n🧪 **OUTPUT:** \`${result.out.trim()}\`\n`;
+                full += outMsg;
+                ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: outMsg } }] })}\n\n`));
 
-                // Extract expected outputs from the code's console.log comments
-                const outputLines = result.out.trim().split("\n").filter((l: string) => l.trim());
-                const hasOutput = outputLines.length > 0;
+                const scoreMatch = criticTxt.match(/Score:\s*(\d+)/);
+                const score = scoreMatch ? parseInt(scoreMatch[1]) : 50;
 
-                if (hasOutput) {
-                  const outMsg = `Output: ${outputLines.join(", ")}\n`;
-                  full += outMsg;
-                  ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: outMsg } }] })}\n\n`));
-
-                  // Check if critic mentioned wrong answer
-                  const criticLower = criticTxt.toLowerCase();
-                  const mentionsWrong = criticLower.includes("wrong") || criticLower.includes("incorrect") || criticLower.includes("should be") || criticLower.includes("expected");
-                  const scoreMatch = criticTxt.match(/Score:\s*(\d+)/);
-                  const score = scoreMatch ? parseInt(scoreMatch[1]) : 50;
-
-                  if (!mentionsWrong && score >= 60) {
-                    ok = true;
-                    const msg = `\n\n✅ **BACKEND-VERIFIED** — Round ${r} success. Output: \`${result.out.trim()}\``;
-                    full += msg;
-                    ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: msg } }] })}\n\n`));
-                    break;
-                  } else {
-                    const msg = `\n\n⚠️ **CRITIC FLAGGED ISSUES** — Score: ${score}/100. Re-analyzing...\n`;
-                    full += msg;
-                    ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: msg } }] })}\n\n`));
-                  }
+                if (score >= 70) {
+                  ok = true;
+                  const msg = `\n\n✅ **VERIFIED** — Code runs successfully.`;
+                  full += msg;
+                  ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: msg } }] })}\n\n`));
                 } else {
-                  const msg = `\n\n⚠️ **NO OUTPUT** — Code ran but produced nothing.\n`;
+                  const msg = `\n\n⚠️ **Code runs but may have issues** (Score: ${score}/100). Say "fix it" to retry.`;
                   full += msg;
                   ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: msg } }] })}\n\n`));
                 }
-              } else {
-                const msg = `\n\n❌ **VERIFICATION FAILED:** \`${result.err}\`\n🔄 Re-analyzing...\n`;
-                full += msg;
-                ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: msg } }] })}\n\n`));
+                break; // STOP after Round 1 if code runs
               }
 
+              // Code crashed — only retry on actual errors
+              const msg = `\n\n❌ **ERROR:** \`${result.err}\`\n🔄 Auto-fixing...\n`;
+              full += msg;
+              ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: msg } }] })}\n\n`));
+
               if (code === lastCode) {
-                const stuck = `\n\n⚠️ **Stop condition:** Identical code. Halting.`;
+                const stuck = `\n\n⚠️ Same error repeating. Stopping.`;
                 full += stuck;
                 ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: stuck } }] })}\n\n`));
                 break;
               }
               lastCode = code;
-              recent = [...recent, { role: "assistant", content: reasonTxt + "\n" + execTxt }, { role: "user", content: `Your code failed or was flagged by critic:\n\n${criticTxt}\n\nFix it.` }];
+              recent = [...recent, { role: "assistant", content: reasonTxt + "\n" + execTxt }, { role: "user", content: `Fix this error: ${result.err}` }];
             }
 
-            if (!ok) {
-              const msg = `\n\n⚠️ **Could not verify** after ${rounds} attempts. Try rephrasing.`;
+            if (!ok && rounds >= MAX_ROUNDS) {
+              const msg = `\n\n⚠️ Could not fix after ${rounds} tries. Try rephrasing your question.`;
               full += msg;
               ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: msg } }] })}\n\n`));
             }
