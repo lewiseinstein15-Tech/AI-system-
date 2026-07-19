@@ -7,9 +7,6 @@ import { z } from 'zod';
 
 // ============================================================
 // MULTI-PROVIDER FALLBACK
-// Tries each free provider in order. If one fails at request
-// start (rate limit, quota exhausted, payment_required, model
-// not found), it moves to the next automatically.
 // ============================================================
 
 type ProviderConfig = {
@@ -20,13 +17,12 @@ type ProviderConfig = {
 };
 
 const PROVIDERS: ProviderConfig[] = [
-  { name: "Cerebras", baseURL: "https://api.cerebras.ai/v1", apiKeyEnv: "CEREBRAS_API_KEY", model: process.env.CEREBRAS_MODEL_ID || "gpt-oss-120b" },
-  { name: "Groq", baseURL: "https://api.groq.com/openai/v1", apiKeyEnv: "GROQ_API_KEY", model: process.env.GROQ_MODEL_ID || "openai/gpt-oss-20b" },
+  { name: "Cerebras", baseURL: "https://api.cerebras.ai/v1", apiKeyEnv: "CEREBRAS_API_KEY", model: process.env.CEREBRAS_MODEL_ID || "llama3.1-8b" },
+  { name: "Groq", baseURL: "https://api.groq.com/openai/v1", apiKeyEnv: "GROQ_API_KEY", model: process.env.GROQ_MODEL_ID || "llama-3.1-8b-instant" },
   { name: "OpenRouter", baseURL: "https://openrouter.ai/api/v1", apiKeyEnv: "OPENROUTER_API_KEY", model: process.env.OPENROUTER_MODEL_ID || "deepseek/deepseek-chat-v3:free" },
   { name: "Gemini", baseURL: "https://generativelanguage.googleapis.com/v1beta/openai", apiKeyEnv: "GEMINI_API_KEY", model: process.env.GEMINI_MODEL_ID || "gemini-2.5-flash" },
 ];
 
-// Attempts each provider in order until one successfully starts streaming.
 async function streamWithFallback(
   buildArgs: (model: any) => Parameters<typeof streamText>[0]
 ): Promise<{ result: Awaited<ReturnType<typeof streamText>>; providerName: string }> {
@@ -128,7 +124,7 @@ async function searchArxiv(query: string) {
   return null;
 }
 
-// --- CLAUDE'S HALLUCINATION CHECK ---
+// --- CLAUDE'S STRICT HALLUCINATION CHECK ---
 const VERIFICATION_CLAIM_PATTERNS = [
   /verified/i,
   /passes? all( the)? tests?/i,
@@ -136,19 +132,46 @@ const VERIFICATION_CLAIM_PATTERNS = [
   /ran (this|the) (code|solution)/i,
   /confirmed (to be )?correct/i,
   /0 mismatches/i,
+  /brute.?force/i
 ];
 
 function checkForUnverifiedClaims(finalAnswer: string, toolCalls: any[]): { flagged: boolean; note?: string } {
   const claimsVerification = VERIFICATION_CLAIM_PATTERNS.some((re) => re.test(finalAnswer));
   if (!claimsVerification) return { flagged: false };
 
-  const ranExecuteCode = toolCalls.some((c: any) => c.type === "execute_code");
-
-  if (!ranExecuteCode) {
+  const executeCalls = toolCalls.filter((c: any) => c.type === "execute_code");
+  if (executeCalls.length === 0) {
     return {
       flagged: true,
-      note: "⚠️ **System Warning:** This response claims the code was tested/verified, but no execute_code tool was actually called in this session. Treat any 'verified' claim above with caution — it may be fabricated."
+      note: "⚠️ **System Warning:** This response claims the code was tested/verified, but no execute_code tool was actually called. Treat any 'verified' claim as fabricated."
     };
+  }
+
+  // Gather all real stdout from the sandbox
+  const realOutput = executeCalls.map(c => c.result?.stdout || "").join("\n").trim();
+  
+  // Check if the AI claims a specific final number/answer
+  // Looks for "answer is 18", "result is 18", "total of 18", "output: 18"
+  const finalNumberMatch = finalAnswer.match(/(?:answer is|result is|total of|output is|output:)\s*\*?\*?(\d+)\b/i);
+  if (finalNumberMatch && finalNumberMatch[1]) {
+    const claimedAnswer = finalNumberMatch[1];
+    // If the claimed number is NOT in the real stdout, it's a hallucination
+    if (!realOutput.includes(claimedAnswer)) {
+      return {
+        flagged: true,
+        note: `⚠️ **System Warning:** The AI claims the final answer is ${claimedAnswer}, but the executed code's output does not contain this number. The answer may be fabricated.`
+      };
+    }
+  }
+
+  // Check if it claims brute force testing, but stdout doesn't show proof
+  if (/brute.?force|tested.*\d+.*\d+|n=\d+ to \d+|0 mismatches/i.test(finalAnswer)) {
+    if (!/pass|0 mismatch|success|all correct|true/i.test(realOutput)) {
+       return {
+         flagged: true,
+         note: "⚠️ **System Warning:** This response claims extensive verification (e.g., brute-force testing), but the actual sandbox execution output does not contain matching proof. The verification claims may be fabricated."
+       };
+    }
   }
 
   return { flagged: false };
@@ -280,7 +303,6 @@ export async function POST(req: Request) {
           maxSteps: 3,
           maxTokens: 3000,
           maxRetries: 1,
-          toolChoice: 'required',
           tools: {
             execute_code: tool({
               description: 'Executes Python code and returns stdout, stderr, and exit code.',
@@ -306,11 +328,11 @@ export async function POST(req: Request) {
                     toolCallLog.push({ type: "execute_code", result: { stdout, stderr } });
                     return { stdout, stderr };
                   } else {
-                    toolCallLog.push({ type: "execute_code", result: { error: "Sandbox rate limited" } });
+                    toolCallLog.push({ type: "execute_code", result: { stdout: "", stderr: "Sandbox rate limited" } });
                     return { stdout: "", stderr: "Sandbox rate limited or unavailable." };
                   }
                 } catch (e) {
-                  toolCallLog.push({ type: "execute_code", result: { error: "Network error" } });
+                  toolCallLog.push({ type: "execute_code", result: { stdout: "", stderr: "Network error" } });
                   return { stdout: "", stderr: "Execution network error." };
                 }
               }
@@ -336,9 +358,25 @@ export async function POST(req: Request) {
           }, 5000);
 
           try {
-            for await (const delta of streamResult.textStream) {
-              fullText += delta;
-              controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: delta } }] })}\n\n`));
+            // FIX: Use fullStream to catch tool calls AND display real sandbox output to the UI
+            for await (const part of streamResult.fullStream) {
+              if (part.type === 'text-delta') {
+                fullText += part.textDelta;
+                controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: part.textDelta } }] })}\n\n`));
+              } else if (part.type === 'tool-call') {
+                const toolMsg = "\n> ⏳ **Running code in sandbox...**\n";
+                fullText += toolMsg;
+                controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: toolMsg } }] })}\n\n`));
+              } else if (part.type === 'tool-result') {
+                const result = part.result as any;
+                const stdout = result?.stdout || "";
+                const stderr = result?.stderr || "";
+                const outputMsg = `\n> \n> **Sandbox Output:**\n> \`\`\`\n> ${stdout || stderr}\n> \`\`\`\n> \n`;
+                if (stdout || stderr) {
+                  fullText += outputMsg;
+                  controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: outputMsg } }] })}\n\n`));
+                }
+              }
             }
           } catch (streamError: any) {
             console.error(`Stream Interruption (provider: ${usedProvider}):`, streamError);
