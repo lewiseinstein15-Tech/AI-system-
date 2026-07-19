@@ -3,10 +3,11 @@
 import { useState, useEffect } from "react";
 import Link from "next/link";
 import { useSession } from "next-auth/react";
-import { Plus, Search, Trash2, Edit, MessageSquare } from "lucide-react";
+import { Plus, Search, Trash2, Edit, MessageSquare, Sun, Moon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
+import { useTheme } from "next-themes";
 
 interface Conversation {
   id: string;
@@ -16,24 +17,38 @@ interface Conversation {
 
 export function Sidebar({ onConversationSelect }: { onConversationSelect: (id: string) => void }) {
   const { data: session } = useSession();
+  const { theme, setTheme } = useTheme();
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [searchTerm, setSearchTerm] = useState("");
 
   useEffect(() => {
     const fetchConversations = async () => {
-      const res = await fetch("/api/conversations");
-      const data = await res.json();
-      setConversations(data);
+      try {
+        const res = await fetch("/api/conversations");
+        const data = await res.json();
+        // CRASH FIX: Ensure data is an array before setting it
+        if (Array.isArray(data)) {
+          setConversations(data);
+        }
+      } catch (e) {
+        console.error("Failed to fetch conversations");
+      }
     };
     if (session) fetchConversations();
   }, [session]);
 
   const handleDelete = async (id: string) => {
-    await fetch(`/api/conversations/${id}`, { method: "DELETE" });
-    setConversations(conversations.filter((c) => c.id !== id));
+    try {
+      await fetch(`/api/conversations/${id}`, { method: "DELETE" });
+      setConversations(conversations.filter((c) => c.id !== id));
+    } catch (e) {
+      console.error("Failed to delete");
+    }
   };
 
-  const filteredConversations = conversations.filter((c) =>
+  // CRASH FIX: Always ensure it's an array before filtering
+  const safeConversations = Array.isArray(conversations) ? conversations : [];
+  const filteredConversations = safeConversations.filter((c) =>
     c.title.toLowerCase().includes(searchTerm.toLowerCase())
   );
 
@@ -87,7 +102,15 @@ export function Sidebar({ onConversationSelect }: { onConversationSelect: (id: s
         ))}
       </div>
 
-      <div className="border-t border-border p-4">
+      <div className="border-t border-border p-4 space-y-3">
+        <button
+          onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
+          className="flex items-center justify-between w-full px-3 py-2 rounded-md text-sm font-medium text-foreground/70 hover:bg-accent hover:text-primary transition-colors"
+        >
+          <span>Toggle Theme</span>
+          {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+        </button>
+
         {session ? (
           <div className="flex items-center gap-3">
             <div className="h-8 w-8 rounded-full bg-primary/20 flex items-center justify-center text-primary font-bold">
