@@ -5,10 +5,6 @@ import { createOpenAI } from '@ai-sdk/openai';
 import { streamText } from 'ai';
 import vm from 'vm';
 
-// ============================================================
-// MULTI-PROVIDER FALLBACK
-// ============================================================
-
 type ProviderConfig = {
   name: string;
   baseURL: string;
@@ -27,14 +23,9 @@ async function streamWithFallback(
   buildArgs: (model: any) => Parameters<typeof streamText>[0]
 ): Promise<{ result: Awaited<ReturnType<typeof streamText>>; providerName: string }> {
   let lastError: any = null;
-
   for (const provider of PROVIDERS) {
     const apiKey = process.env[provider.apiKeyEnv];
-    if (!apiKey) {
-      console.warn(`Skipping ${provider.name}: ${provider.apiKeyEnv} not set`);
-      continue;
-    }
-
+    if (!apiKey) { console.warn(`Skipping ${provider.name}: ${provider.apiKeyEnv} not set`); continue; }
     try {
       const client = createOpenAI({ baseURL: provider.baseURL, apiKey });
       const model = client(provider.model);
@@ -48,97 +39,59 @@ async function streamWithFallback(
       continue;
     }
   }
-
-  throw new Error(
-    `All providers exhausted. Last error: ${lastError?.message || "unknown"}`
-  );
+  throw new Error(`All providers exhausted. Last error: ${lastError?.message || "unknown"}`);
 }
 
-// Helper to truncate text
 function truncate(str: string | null, max: number) {
   if (!str) return null;
   return str.length > max ? str.substring(0, max) + "..." : str;
 }
 
-// Helper to fetch with a timeout
 async function fetchWithTimeout(url: string, options: any = {}, ms: number = 5000) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), ms);
   try {
-    const res = await fetch(url, { ...options, signal: controller.signal });
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
     clearTimeout(timeout);
-    return res;
-  } catch (e) {
-    clearTimeout(timeout);
-    throw e;
   }
 }
 
-// --- LOCAL JAVASCRIPT EXECUTION ENGINE ---
 function executeJsSafely(code: string): { stdout: string; stderr: string } {
   let stdout = "";
   let stderr = "";
   try {
     const sandbox = {
-      console: {
-        log: (...args: any[]) => { stdout += args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ') + '\n'; }
-      },
-      Math: Math,
-      Date: Date,
-      JSON: JSON,
-      Array: Array,
-      Map: Map,
-      Set: Set
+      console: { log: (...args: any[]) => { stdout += args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ') + '\n'; } },
+      Math, Date, JSON, Array, Map, Set
     };
-    
     const context = vm.createContext(sandbox);
     vm.runInContext(code, context, { timeout: 3000 });
-  } catch (e: any) {
-    stderr = e.message || "Execution error";
-  }
+  } catch (e: any) { stderr = e.message || "Execution error"; }
   return { stdout, stderr };
 }
-
-// ============================================================
-// STRICT 4-PHASE ACT STATE MACHINE
-// ============================================================
 
 const MAX_ROUNDS = 2;
 
 function extractJsCode(text: string): string | null {
-  const match = text.match(/```javascript\s*([\s\S]*?)```/) || text.match(/```\s*([\s\S]*?)```/);
-  return match ? match[1].trim() : null;
+  const jsMatch = text.match(/```(?:javascript|js)\s*([\s\S]*?)```/);
+  if (jsMatch) return jsMatch[1].trim();
+  const genericMatch = text.match(/```\s*([\s\S]*?)```/);
+  return genericMatch ? genericMatch[1].trim() : null;
 }
 
 function backendExecute(code: string): { ok: boolean; stdout: string; stderr: string } {
   try {
     const { stdout, stderr } = executeJsSafely(code);
     return { ok: stderr.length === 0, stdout, stderr };
-  } catch (e: any) {
-    return { ok: false, stdout: "", stderr: `Execution error: ${e.message}` };
-  }
+  } catch (e: any) { return { ok: false, stdout: "", stderr: `Execution error: ${e.message}` }; }
 }
 
-// Stream a single AI state and return the full text
-async function streamAIState(
-  systemPrompt: string,
-  messages: any[],
-  temperature: number,
-  controller: any,
-  encoder: TextEncoder,
-  header: string
-): Promise<string> {
-  // Send the header to the UI
+async function streamAIState(systemPrompt: string, messages: any[], temperature: number, controller: any, encoder: TextEncoder, header: string): Promise<string> {
   controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: header } }] })}\n\n`));
-  
   const { result } = await streamWithFallback((model) => ({
-    model,
-    messages: [{ role: "system", content: systemPrompt }, ...messages],
-    temperature,
-    maxTokens: 2000,
-    maxRetries: 3,
+    model, messages: [{ role: "system", content: systemPrompt }, ...messages], temperature, maxTokens: 2000, maxRetries: 3,
   }));
-
   let text = "";
   for await (const delta of result.textStream) {
     text += delta;
@@ -146,10 +99,6 @@ async function streamAIState(
   }
   return text;
 }
-
-// ============================================================
-// MEGA SEARCH AGENT HELPERS
-// ============================================================
 
 async function searchWiki(query: string) {
   const searchRes = await fetchWithTimeout(`https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(query)}&format=json&origin=*`);
@@ -164,11 +113,13 @@ async function searchWiki(query: string) {
 }
 
 async function searchDdg(query: string) {
-  const res = await fetchWithTimeout(`https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1&skip_disambig=1`);
-  const data = await res.json();
-  if (data.AbstractText) return `DuckDuckGo: ${data.AbstractText}`;
-  if (data.RelatedTopics?.[0]?.Text) return `DuckDuckGo: ${data.RelatedTopics[0].Text}`;
-  return null;
+  try {
+    const res = await fetchWithTimeout(`https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1&skip_disambig=1`, { headers: { 'Accept': 'application/json', 'User-Agent': 'CSHubBot/1.0' } });
+    const data = await res.json();
+    if (data.AbstractText) return `DuckDuckGo: ${data.AbstractText}`;
+    if (data.RelatedTopics?.[0]?.Text) return `DuckDuckGo: ${data.RelatedTopics[0].Text}`;
+    return null;
+  } catch { return null; }
 }
 
 async function searchHn(query: string) {
@@ -186,7 +137,9 @@ async function searchSo(query: string) {
 }
 
 async function searchGh(query: string) {
-  const res = await fetchWithTimeout(`https://api.github.com/search/repositories?q=${encodeURIComponent(query)}&sort=stars&order=desc&per_page=2`);
+  const headers: Record<string, string> = { 'Accept': 'application/vnd.github.v3+json' };
+  if (process.env.GITHUB_TOKEN) headers['Authorization'] = `token ${process.env.GITHUB_TOKEN}`;
+  const res = await fetchWithTimeout(`https://api.github.com/search/repositories?q=${encodeURIComponent(query)}&sort=stars&order=desc&per_page=2`, { headers });
   const data = await res.json();
   if (data.items?.length > 0) return `GitHub: ${data.items.map((i: any) => i.full_name).join(' | ')}`;
   return null;
@@ -200,10 +153,6 @@ async function searchArxiv(query: string) {
   return null;
 }
 
-// ============================================================
-// MAIN API ROUTE
-// ============================================================
-
 export async function POST(req: Request) {
   try {
     const session = await getServerSession(authOptions);
@@ -211,29 +160,20 @@ export async function POST(req: Request) {
 
     const { messages, conversationId } = await req.json();
     const userPrompt = messages[messages.length - 1].content;
-
     let currentConvId = conversationId;
 
     if (!currentConvId) {
-      const newConversation = await prisma.conversation.create({
-        data: { userId: session.user.id, title: userPrompt.substring(0, 30) + "..." },
-      });
+      const newConversation = await prisma.conversation.create({ data: { userId: session.user.id, title: userPrompt.substring(0, 30) + "..." } });
       currentConvId = newConversation.id;
     }
 
-    await prisma.message.create({
-      data: { conversationId: currentConvId, role: "user", content: userPrompt },
-    });
-
+    await prisma.message.create({ data: { conversationId: currentConvId, role: "user", content: userPrompt } });
     const lowerUserPrompt = userPrompt.toLowerCase();
 
-    // --- INSTANT SEARCH TRIGGER ---
     const isSearchIntent = lowerUserPrompt.startsWith("search for") || lowerUserPrompt.includes("search the web") || lowerUserPrompt.startsWith("look up") || lowerUserPrompt.startsWith("search ");
 
     if (isSearchIntent) {
-      let query = userPrompt.replace(/(search for|search the web for|look up|search)/i, "").trim();
-      query = query.replace(/["']/g, "").trim();
-
+      let query = userPrompt.replace(/(search for|search the web for|look up|search)/i, "").trim().replace(/["']/g, "").trim();
       const encoder = new TextEncoder();
       const searchStream = new ReadableStream({
         async start(controller) {
@@ -259,16 +199,8 @@ export async function POST(req: Request) {
               { role: "system", content: `You searched 6 sources for "${query}". Results:\n\n${searchContext}\n\nSummarize and cite sources.` },
               { role: "user", content: query }
             ];
-
             try {
-              const { result } = await streamWithFallback((model) => ({
-                model,
-                messages: synthesizeMessages,
-                temperature: 0.3,
-                maxTokens: 1000,
-                maxRetries: 3, 
-              }));
-
+              const { result } = await streamWithFallback((model) => ({ model, messages: synthesizeMessages, temperature: 0.3, maxTokens: 1000, maxRetries: 3 }));
               for await (const delta of result.textStream) {
                 controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: delta } }] })}\n\n`));
                 aiText += delta;
@@ -281,28 +213,26 @@ export async function POST(req: Request) {
             aiText = `I searched for "${query}", but couldn't find a direct answer.`;
             controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: aiText } }] })}\n\n`));
           }
-
           controller.enqueue(encoder.encode('data: [DONE]\n\n'));
           controller.close();
-
-          await prisma.message.create({ data: { conversationId: currentConvId, role: "assistant", content: aiText } });
-          await prisma.conversation.update({ where: { id: currentConvId }, data: { updatedAt: new Date() } });
+          try {
+            await prisma.message.create({ data: { conversationId: currentConvId, role: "assistant", content: aiText } });
+            await prisma.conversation.update({ where: { id: currentConvId }, data: { updatedAt: new Date() } });
+          } catch (dbError) { console.error("Failed to save search message:", dbError); }
         }
       });
       return new Response(searchStream, { headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' } });
     }
 
-    // --- 4-PHASE ACT STATE MACHINE (CODING QUESTIONS) ---
     const isCodingQuestion = lowerUserPrompt.includes("code") || lowerUserPrompt.includes("algorithm") || lowerUserPrompt.includes("trace") || lowerUserPrompt.includes("solve") || lowerUserPrompt.includes("string") || lowerUserPrompt.includes("array") || lowerUserPrompt.includes("tree") || lowerUserPrompt.includes("graph") || lowerUserPrompt.includes("dp");
 
     if (isCodingQuestion) {
-      const recentMessages = messages.slice(-4).map((m: any) => {
+      let recentMessages = messages.slice(-4).map((m: any) => {
         let safeContent = m.content;
         if (safeContent.includes("data:image")) safeContent = "[User attached an image.]";
         return { role: m.role === "assistant" ? "assistant" : "user", content: safeContent };
       });
 
-      // CLAUDE'S STRICT PROMPTS
       const REASON_PROMPT = `You are an elite software engineer analyzing a coding problem.
 Analyze the problem concisely:
 - What are the exact inputs, outputs, and constraints?
@@ -323,39 +253,26 @@ Score the code from 0 to 100.
 YOU MAY ONLY OUTPUT ONE PHASE. Output ONLY the score and a brief critique.`;
 
       const encoder = new TextEncoder();
-      let fullText = "";
-      let verified = false;
-      let roundsUsed = 0;
-      let lastCode = "";
+      let fullText = "", verified = false, roundsUsed = 0, lastCode = "";
 
       const customStream = new ReadableStream({
         async start(controller) {
-          const heartbeat = setInterval(() => {
-            controller.enqueue(encoder.encode(`: heartbeat\n\n`));
-          }, 5000);
-
+          const heartbeat = setInterval(() => { controller.enqueue(encoder.encode(`: heartbeat\n\n`)); }, 5000);
           try {
             for (let round = 1; round <= MAX_ROUNDS; round++) {
               roundsUsed = round;
-
-              // ── STATE 1: REASON ──
               const reasonHeader = `\n🧠 **REASONING (Round ${round})...**\n\n`;
               const reasonText = await streamAIState(REASON_PROMPT, recentMessages, 0.2, controller, encoder, reasonHeader);
               fullText += reasonHeader + reasonText;
 
-              // ── STATE 2: EXECUTE ──
               const executeHeader = `\n\n💻 **CODING...**\n\n`;
-              const executeMessages = [...recentMessages, { role: "assistant", content: reasonText }, { role: "user", content: "Write the code now." }];
-              const executeText = await streamAIState(EXECUTE_PROMPT, executeMessages, 0.1, controller, encoder, executeHeader);
+              const executeText = await streamAIState(EXECUTE_PROMPT, [...recentMessages, { role: "assistant", content: reasonText }, { role: "user", content: "Write the code now." }], 0.1, controller, encoder, executeHeader);
               fullText += executeHeader + executeText;
 
-              // ── STATE 3: CRITIC ──
               const criticHeader = `\n\n🕵️ **CRITIQUING...**\n\n`;
-              const criticMessages = [...recentMessages, { role: "assistant", content: reasonText }, { role: "assistant", content: executeText }, { role: "user", content: "Critique this code." }];
-              const criticText = await streamAIState(CRITIC_PROMPT, criticMessages, 0.2, controller, encoder, criticHeader);
+              const criticText = await streamAIState(CRITIC_PROMPT, [...recentMessages, { role: "assistant", content: reasonText }, { role: "assistant", content: executeText }, { role: "user", content: "Critique this code." }], 0.2, controller, encoder, criticHeader);
               fullText += criticHeader + criticText;
 
-              // ── STATE 4: VERIFY ──
               const code = extractJsCode(executeText);
               if (!code) {
                 const noCodeMsg = `\n\n⚠️ No code block found. Retrying...\n`;
@@ -365,7 +282,6 @@ YOU MAY ONLY OUTPUT ONE PHASE. Output ONLY the score and a brief critique.`;
               }
 
               const execResult = backendExecute(code);
-
               if (execResult.ok) {
                 verified = true;
                 const verifiedMsg = `\n\n✅ **BACKEND-VERIFIED** — Code was independently re-executed by the server (Round ${round}) and confirmed to run without error. Real output: \`${execResult.stdout.trim()}\``;
@@ -385,18 +301,13 @@ YOU MAY ONLY OUTPUT ONE PHASE. Output ONLY the score and a brief critique.`;
                 break;
               }
               lastCode = code;
-
-              // Feed real error back for next round's REASON phase
-              recentMessages.push({ role: "assistant", content: reasonText + "\n" + executeText });
-              recentMessages.push({ role: "user", content: `Your code failed with this REAL error:\n\n${execResult.stderr}\n\nRe-analyze and fix it.` });
+              recentMessages = [...recentMessages, { role: "assistant", content: reasonText + "\n" + executeText }, { role: "user", content: `Your code failed with this REAL error:\n\n${execResult.stderr}\n\nRe-analyze and fix it.` }];
             }
-
             if (!verified) {
               const unverifiedMsg = `\n\n⚠️ **Could not fully verify this solution.** After ${roundsUsed} attempts, the backend could not get this code to execute successfully. Please try rephrasing the question.`;
               fullText += unverifiedMsg;
               controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: unverifiedMsg } }] })}\n\n`));
             }
-
           } catch (streamError: any) {
             console.error("Stream Interruption:", streamError);
             const errorMsg = "\n\n*(System: The AI stream was interrupted. Please try again.)*";
@@ -408,51 +319,43 @@ YOU MAY ONLY OUTPUT ONE PHASE. Output ONLY the score and a brief critique.`;
             clearInterval(heartbeat);
             controller.enqueue(encoder.encode('data: [DONE]\n\n'));
             controller.close();
-
-            await prisma.message.create({ data: { conversationId: currentConvId, role: "assistant", content: fullText } });
-            await prisma.conversation.update({ where: { id: currentConvId }, data: { updatedAt: new Date() } });
+            try {
+              await prisma.message.create({ data: { conversationId: currentConvId, role: "assistant", content: fullText } });
+              await prisma.conversation.update({ where: { id: currentConvId }, data: { updatedAt: new Date() } });
+            } catch (dbError) { console.error("Failed to save coding message:", dbError); }
           }
         }
       });
-
       return new Response(customStream, { headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' } });
-
     } else {
-      // --- NORMAL AI CHAT ---
       const systemPrompt = `You are CS Hub AI, an elite assistant created by Lewis Einstein (AI/ML Engineer) for Kibabii University. 
       If asked who built you, say "I was built by Lewis Einstein, an AI and ML Engineer."
-      
       You are a helpful, conversational AI. Answer questions clearly using markdown. 
-      
       You have special commands (tools) that you can use to save things to the user's dashboard. You MUST ONLY output these commands if the user EXPLICITLY asks you to do so. Do not output these commands just to explain what you can do. 
-      
       Commands:
       - If the user explicitly says "create flashcard" or "save flashcard", output ONLY: [ACTION:CREATE_FLASHCARD] Front: <text> | Back: <text>
       - If the user explicitly says "save note" or "create note", output ONLY: [ACTION:SAVE_NOTE] Title: <text> | Content: <text>
       - If the user explicitly says "add assignment" or "schedule assignment", output ONLY: [ACTION:CREATE_ASSIGNMENT] Title: <text> | Due: <YYYY-MM-DDTHH:MM:SS>
-      
       If the user just asks a general question (like "What can you do?"), explain your capabilities in plain English. Do not output the raw command syntax unless you are actually performing the action.`;
+
       const recentMessages = messages.slice(-6);
-      const aiMessages = [
-        { role: "system", content: systemPrompt },
-        ...recentMessages.map((m: any) => ({ role: m.role === "assistant" ? "assistant" : "user", content: m.content.includes("data:image") ? "[Image]" : m.content }))
-      ];
+      const aiMessages = [{ role: "system", content: systemPrompt }, ...recentMessages.map((m: any) => ({ role: m.role === "assistant" ? "assistant" : "user", content: m.content.includes("data:image") ? "[Image]" : m.content }))];
 
       let streamResult;
       try {
-        const { result } = await streamWithFallback((model) => ({
-          model,
-          messages: aiMessages,
-          temperature: 0.5,
-          maxTokens: 2000,
-          maxRetries: 3
-        }));
+        const { result } = await streamWithFallback((model) => ({ model, messages: aiMessages, temperature: 0.5, maxTokens: 2000, maxRetries: 3 }));
         streamResult = result;
       } catch (fallbackError: any) {
-        return new Response(
-          JSON.stringify({ error: "All AI providers are currently unavailable.", details: fallbackError.message }),
-          { status: 503 }
-        );
+        const encoder = new TextEncoder();
+        const errorStream = new ReadableStream({
+          start(controller) {
+            const errorMsg = `*(System: All AI providers are currently unavailable. Details: ${fallbackError.message})*`;
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: errorMsg } }] })}\n\n`));
+            controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+            controller.close();
+          }
+        });
+        return new Response(errorStream, { headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' } });
       }
 
       const encoder = new TextEncoder();
@@ -467,31 +370,32 @@ YOU MAY ONLY OUTPUT ONE PHASE. Output ONLY the score and a brief critique.`;
           controller.close();
 
           const lowerAiText = fullText.toLowerCase();
-          if (lowerAiText.includes("action:create_flashcard") || (lowerUserPrompt.includes("create") && lowerUserPrompt.includes("flashcard"))) {
-            const match = fullText.match(/Front:\s*(.*?)\s*\|\s*Back:\s*(.*)/i);
-            if (match) {
-              await prisma.flashcard.create({ data: { front: match[1].trim(), back: match[2].trim(), userId: session.user.id } });
-            }
-          } else if (lowerAiText.includes("action:save_note") || (lowerUserPrompt.includes("save") && lowerUserPrompt.includes("note"))) {
-            const match = fullText.match(/Title:\s*(.*?)\s*\|\s*Content:\s*(.*)/i);
-            if (match) {
-              await prisma.note.create({ data: { title: match[1].trim(), content: match[2].trim(), userId: session.user.id } });
-            }
-          } else if (lowerAiText.includes("action:create_assignment") || (lowerUserPrompt.includes("add") && lowerUserPrompt.includes("assignment"))) {
-            const match = fullText.match(/Title:\s*(.*?)\s*\|\s*Due:\s*(.*)/i);
-            if (match) {
-              const dueDate = new Date(match[2].trim());
-              if (!isNaN(dueDate.getTime())) {
-                await prisma.assignment.create({ data: { title: match[1].trim(), dueDate, userId: session.user.id } });
+          const hasFlashcardAction = lowerAiText.includes("action:create_flashcard");
+          const userWantsFlashcard = lowerUserPrompt.includes("create") && lowerUserPrompt.includes("flashcard");
+          const hasNoteAction = lowerAiText.includes("action:save_note");
+          const userWantsNote = lowerUserPrompt.includes("save") && lowerUserPrompt.includes("note");
+          const hasAssignmentAction = lowerAiText.includes("action:create_assignment");
+          const userWantsAssignment = lowerUserPrompt.includes("add") && lowerUserPrompt.includes("assignment");
+
+          try {
+            if ((hasFlashcardAction || userWantsFlashcard) && !fullText.includes("[SAVED:FLASHCARD]")) {
+              const match = fullText.match(/Front:\s*(.*?)\s*\|\s*Back:\s*(.*)/i);
+              if (match) { await prisma.flashcard.create({ data: { front: match[1].trim(), back: match[2].trim(), userId: session.user.id } }); fullText += "\n[SAVED:FLASHCARD]"; }
+            } else if ((hasNoteAction || userWantsNote) && !fullText.includes("[SAVED:NOTE]")) {
+              const match = fullText.match(/Title:\s*(.*?)\s*\|\s*Content:\s*(.*)/i);
+              if (match) { await prisma.note.create({ data: { title: match[1].trim(), content: match[2].trim(), userId: session.user.id } }); fullText += "\n[SAVED:NOTE]"; }
+            } else if ((hasAssignmentAction || userWantsAssignment) && !fullText.includes("[SAVED:ASSIGNMENT]")) {
+              const match = fullText.match(/Title:\s*(.*?)\s*\|\s*Due:\s*(.*)/i);
+              if (match) {
+                const dueDate = new Date(match[2].trim());
+                if (!isNaN(dueDate.getTime())) { await prisma.assignment.create({ data: { title: match[1].trim(), dueDate, userId: session.user.id } }); fullText += "\n[SAVED:ASSIGNMENT]"; }
               }
             }
-          }
-
-          await prisma.message.create({ data: { conversationId: currentConvId, role: "assistant", content: fullText } });
-          await prisma.conversation.update({ where: { id: currentConvId }, data: { updatedAt: new Date() } });
+            await prisma.message.create({ data: { conversationId: currentConvId, role: "assistant", content: fullText } });
+            await prisma.conversation.update({ where: { id: currentConvId }, data: { updatedAt: new Date() } });
+          } catch (dbError) { console.error("Failed to save chat message:", dbError); }
         }
       });
-
       return new Response(customStream, { headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' } });
     }
   } catch (error: any) {
