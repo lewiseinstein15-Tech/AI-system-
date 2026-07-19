@@ -113,8 +113,10 @@ function extractFunctionName(code: string): string | null {
 }
 
 // Independently re-executes code LOCALLY. Does not rely on anything the model claims.
-function backendExecute(code: string, testCall: string): { ok: boolean; stdout: string; stderr: string } {
-  const harness = `${code}\n\nconsole.log(${testCall});`;
+function backendExecute(code: string, funcName: string): { ok: boolean; stdout: string; stderr: string } {
+  // Build a test harness that actually calls the AI's function with a test input
+  const testInput = `"a1b2c3"`; // Test string input
+  const harness = `${code}\n\nconsole.log(${funcName}(${testInput}));`;
   try {
     const { stdout, stderr } = executeJsSafely(harness);
     return { ok: stderr.length === 0, stdout, stderr };
@@ -127,12 +129,11 @@ function backendExecute(code: string, testCall: string): { ok: boolean; stdout: 
 // feed the REAL error back and force a fix -> repeat until it actually works.
 async function verificationLoop(
   systemPrompt: string,
-  userMessages: any[],
-  testCall: string
-): Promise<{ finalCode: string | null; verified: boolean; rounds: number; log: string[] }> {
+  userMessages: any[]
+): Promise<{ finalText: string; verified: boolean; rounds: number; log: string[] }> {
   const log: string[] = [];
   let messages = [...userMessages];
-  let lastCode: string | null = null;
+  let lastText = "";
 
   for (let round = 1; round <= MAX_LOOP_ROUNDS; round++) {
     const { result } = await streamWithFallback((model) => ({
@@ -145,6 +146,7 @@ async function verificationLoop(
 
     let text = "";
     for await (const delta of result.textStream) text += delta;
+    lastText = text;
 
     const code = extractJsCode(text);
     if (!code) {
@@ -154,7 +156,6 @@ async function verificationLoop(
       continue;
     }
 
-    lastCode = code;
     const funcName = extractFunctionName(code);
     if (!funcName) {
       log.push(`Round ${round}: could not detect a function definition.`);
@@ -163,11 +164,11 @@ async function verificationLoop(
       continue;
     }
 
-    const execResult = backendExecute(code, testCall);
+    const execResult = backendExecute(code, funcName);
 
     if (execResult.ok) {
       log.push(`Round ${round}: backend execution succeeded. Real stdout: ${execResult.stdout}`);
-      return { finalCode: code, verified: true, rounds: round, log };
+      return { finalText: text, verified: true, rounds: round, log };
     }
 
     // Real failure — feed the REAL error back, not a hint, the actual stderr.
@@ -179,7 +180,7 @@ async function verificationLoop(
     });
   }
 
-  return { finalCode: lastCode, verified: false, rounds: MAX_LOOP_ROUNDS, log };
+  return { finalText: lastText, verified: false, rounds: MAX_LOOP_ROUNDS, log };
 }
 
 // --- MEGA SEARCH AGENT HELPERS ---
@@ -336,25 +337,24 @@ export async function POST(req: Request) {
         return { role: m.role === "assistant" ? "assistant" : "user", content: safeContent };
       });
 
-      const testCall = "0"; // Default test call for the local JS engine
-
       // ── THE VERIFICATION LOOP RUNS HERE ──
       const loopResult = await verificationLoop(
         systemPrompt,
-        recentMessages,
-        testCall
+        recentMessages
       );
 
       const encoder = new TextEncoder();
-      let fullText = "";
+      let fullText = loopResult.finalText;
+      
+      // Append verification stamp
+      if (loopResult.verified) {
+        fullText += `\n\n✅ **Backend-verified** — this code was independently re-executed by the server (${loopResult.rounds} round${loopResult.rounds > 1 ? "s" : ""} needed) and confirmed to run without error. This is not a self-reported claim from the AI.`;
+      } else {
+        fullText += `\n\n⚠️ **Could not verify this solution.** After ${loopResult.rounds} attempts, the backend still could not get this code to execute successfully. Do not treat this as a correct answer — please try again or rephrase the question.`;
+      }
+
       const customStream = new ReadableStream({
         async start(controller) {
-          if (loopResult.verified && loopResult.finalCode) {
-            fullText = `\`\`\`javascript\n${loopResult.finalCode}\n\`\`\`\n\n✅ **Backend-verified** — this code was independently re-executed by the server (${loopResult.rounds} round${loopResult.rounds > 1 ? "s" : ""} needed) and confirmed to run without error. This is not a self-reported claim from the AI.`;
-          } else {
-            fullText = `\`\`\`javascript\n${loopResult.finalCode || "// no code produced"}\n\`\`\`\n\n⚠️ **Could not verify this solution.** After ${loopResult.rounds} attempts, the backend still could not get this code to execute successfully. Do not treat this as a correct answer — please try again or rephrase the question.`;
-          }
-
           controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: fullText } }] })}\n\n`));
           controller.enqueue(encoder.encode('data: [DONE]\n\n'));
           controller.close();
