@@ -86,12 +86,20 @@ function checkForUnverifiedClaims(finalAnswer: string, toolCalls: any[]): { flag
   const claimsVerification = VERIFICATION_CLAIM_PATTERNS.some((re) => re.test(finalAnswer));
   if (!claimsVerification) return { flagged: false };
 
+  const ranStressTest = toolCalls.some((c: any) => c.type === "stress_test_code" && c.result?.all_passed === true);
   const ranExecuteCode = toolCalls.some((c: any) => c.type === "execute_code");
 
-  if (!ranExecuteCode) {
+  if (!ranStressTest && !ranExecuteCode) {
     return {
       flagged: true,
-      note: "⚠️ **System Warning:** This response claims the code was tested/verified, but no execute_code tool was actually called in this session. Treat any 'verified' claim above with caution — it may be fabricated."
+      note: "⚠️ **System Warning:** This response claims the code was tested/verified, but no execute_code or stress_test_code tool was actually called in this session. Treat any 'verified' claim above with caution — it may be fabricated."
+    };
+  }
+
+  if (/stress test|brute force|random (cases|trials)/i.test(finalAnswer) && !ranStressTest) {
+    return {
+      flagged: true,
+      note: "⚠️ **System Warning:** This response references stress testing against a brute force / random trials, but stress_test_code was never actually called (or didn't return all_passed: true) in this session. Treat that specific claim with caution."
     };
   }
 
@@ -101,7 +109,7 @@ function checkForUnverifiedClaims(finalAnswer: string, toolCalls: any[]): { flag
 // --- SELF-DEBUGGING PIPELINE ---
 const GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions";
 const PISTON_API_URL = "https://emkc.org/api/v2/piston/execute";
-const MAX_DEBUG_ROUNDS = 5;
+const MAX_DEBUG_ROUNDS = 2; // Reduced to 2 to guarantee no Render timeouts
 
 const SYSTEM_PROMPT = `You are the CS Hub AI, an expert coding assistant.
 MANDATORY DEBUGGING WORKFLOW:
@@ -109,7 +117,11 @@ MANDATORY DEBUGGING WORKFLOW:
 2. You MUST invoke the execute_code tool to actually run it.
 3. Read the REAL output/error returned by the tool. Do not guess.
 4. If there is an error, FIX the code and invoke execute_code again. Repeat until correct.
-5. Only after the tool passes should you give your final answer to the user. State what you verified.
+
+MANDATORY VERIFICATION:
+5. After passing execute_code, you MUST invoke stress_test_code for algorithmic problems. 
+6. If stress_test_code reports mismatches, fix your algorithm and test again until 0 mismatches.
+7. Only after both tools pass should you give your final answer to the user. State what you verified.
 
 ABSOLUTE RULE ON TOOL USAGE:
 - You CANNOT call tools by writing Python code like "execute_code(...)". That code will never run.
@@ -130,6 +142,24 @@ const TOOLS = [
           stdin: { type: "string", description: "Optional stdin input" }
         },
         required: ["language", "code"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "stress_test_code",
+      description: "Auto-generates N random test inputs and cross-checks an optimized solution against a brute-force reference.",
+      parameters: {
+        type: "object",
+        properties: {
+          function_name: { type: "string", description: "The exact function name both solutions must define." },
+          solution_code: { type: "string", description: "Complete Python code defining the optimized solution." },
+          brute_force_code: { type: "string", description: "Complete Python code defining a simple, obviously-correct reference function." },
+          generator_code: { type: "string", description: "Complete Python code defining a function generate_input() returning a tuple of arguments." },
+          num_trials: { type: "integer", description: "How many random trials to run. Default 50." }
+        },
+        required: ["function_name", "solution_code", "brute_force_code", "generator_code"],
       },
     },
   }
@@ -166,25 +196,67 @@ async function executeCode(language: string, code: string, stdin: string = ""): 
   }
 }
 
-// CLAUDE'S FIX: Added forceExecuteCode parameter
-async function callGroq(messages: any[], forceExecuteCode: boolean = false) {
+async function stressTestCode(args: any): Promise<string> {
+  const trials = Math.min(Math.max(args.num_trials || 50, 1), 100);
+  
+  // CLAUDE'S FIX: Use exec() for ALL code blocks to completely prevent IndentationError in the harness
+  const harness = `
+import json
+_sol_ns = {}
+exec(${JSON.stringify(args.solution_code)}, _sol_ns)
+_solution_fn = _sol_ns[${JSON.stringify(args.function_name)}]
+
+_brute_ns = {}
+exec(${JSON.stringify(args.brute_force_code)}, _brute_ns)
+_brute_fn = _brute_ns[${JSON.stringify(args.function_name)}]
+
+_gen_ns = {}
+exec(${JSON.stringify(args.generator_code)}, _gen_ns)
+_gen_fn = _gen_ns['generate_input']
+
+mismatches = []
+errors = []
+for i in range(${trials}):
+    try:
+        inputs = _gen_fn()
+        if not isinstance(inputs, tuple): inputs = (inputs,)
+    except Exception as e:
+        errors.append({"trial": i, "error": "gen err: " + str(e)}); continue
+    try: sol = _solution_fn(*inputs)
+    except Exception as e: errors.append({"trial": i, "inputs": repr(inputs), "error": "sol err: " + str(e)}); continue
+    try: bru = _brute_fn(*inputs)
+    except Exception as e: errors.append({"trial": i, "inputs": repr(inputs), "error": "brt err: " + str(e)}); continue
+    if sol != bru: mismatches.append({"trial": i, "inputs": repr(inputs), "sol": repr(sol), "brt": repr(bru)})
+    if len(mismatches) >= 5: break
+print(json.dumps({"trials": ${trials}, "mismatches": len(mismatches), "mismatches_list": mismatches[:5], "errors": errors[:5], "all_passed": len(mismatches)==0 and len(errors)==0}))
+`;
+  try {
+    const run = await runPiston("python", "3.10.0", harness, "");
+    return run.stdout?.trim() || JSON.stringify({ error: "No output", stderr: run.stderr });
+  } catch (err: any) {
+    return JSON.stringify({ error: `Stress test failed: ${err.message}` });
+  }
+}
+
+async function callGroq(messages: any[], forceExecuteCode: boolean = false, useTools: boolean = true) {
   if (!process.env.GROQ_API_KEY) {
     throw new Error("GROQ_API_KEY is not set in environment variables");
   }
 
   const body: any = {
-    model: "llama-3.1-8b-instant",
+    model: process.env.GROQ_MODEL || "llama-3.1-8b-instant",
     messages,
-    tools: TOOLS,
     temperature: 0.15,
     max_tokens: 4000,
   };
 
-  // CLAUDE'S FIX: On round 0, force the AI to call execute_code so it can't skip it
-  if (forceExecuteCode) {
-    body.tool_choice = { type: "function", function: { name: "execute_code" } };
-  } else {
-    body.tool_choice = "auto";
+  if (useTools) {
+    body.tools = TOOLS;
+    if (forceExecuteCode) {
+      body.tool_choice = { type: "function", function: { name: "execute_code" } };
+    } else {
+      body.tool_choice = "auto";
+    }
   }
 
   const res = await fetchWithTimeout(
@@ -263,7 +335,7 @@ export async function POST(req: Request) {
               { role: "user", content: query }
             ];
             try {
-              const synthRes = await callGroq(synthesizeMessages);
+              const synthRes = await callGroq(synthesizeMessages, false, false);
               aiText = synthRes.choices?.[0]?.message?.content
                 || `I found some results for "${query}" but couldn't summarize them. Please try again.`;
             } catch (e: any) {
@@ -301,8 +373,7 @@ export async function POST(req: Request) {
       const executionLog: any[] = []; 
 
       while (debugRounds < MAX_DEBUG_ROUNDS) {
-        // CLAUDE'S FIX: Force execute_code on round 0
-        const response = await callGroq(groqMessages, debugRounds === 0);
+        const response = await callGroq(groqMessages, debugRounds === 0, true);
         const message = response.choices?.[0]?.message;
 
         if (!message) {
@@ -318,6 +389,9 @@ export async function POST(req: Request) {
             if (toolCall.function.name === "execute_code") {
               result = await executeCode(args.language, args.code, args.stdin || "");
               executionLog.push({ type: "execute_code", language: args.language, code: args.code, result: safeParse(result) });
+            } else if (toolCall.function.name === "stress_test_code") {
+              result = await stressTestCode(args);
+              executionLog.push({ type: "stress_test_code", function_name: args.function_name, num_trials: args.num_trials || 50, result: safeParse(result) });
             } else {
               result = JSON.stringify({ error: "Unknown tool" });
             }
@@ -345,7 +419,7 @@ export async function POST(req: Request) {
         { role: "system", content: systemPrompt },
         ...recentMessages.map((m: any) => ({ role: m.role === "assistant" ? "assistant" : "user", content: m.content.includes("data:image") ? "[Image]" : m.content }))
       ];
-      const response = await callGroq(aiMessages);
+      const response = await callGroq(aiMessages, false, false);
       aiText = response.choices?.[0]?.message?.content || "I couldn't generate a response. Please try again.";
     }
 
