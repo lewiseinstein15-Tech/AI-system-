@@ -1,3 +1,9 @@
+// SAVE THIS FILE AT: src/app/api/chat/route.ts
+//
+// This replaces your existing src/app/api/chat/route.ts file exactly —
+// same path, same filename, so nothing else in your app that calls
+// /api/chat will 404. Do not rename the file or its folder.
+
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
@@ -8,7 +14,10 @@ function truncate(str: string | null, max: number) {
   return str.length > max ? str.substring(0, max) + "..." : str;
 }
 
-// Helper to fetch with a timeout so slow websites don't hold up the AI
+// Helper to fetch with a timeout so slow requests don't hold up the AI.
+// This was already used for the search helpers below, but NOT for
+// callGroq() or runPiston() — the two calls most likely to hang during
+// the multi-round debugging loop. That gap is fixed further down.
 async function fetchWithTimeout(url: string, options: any = {}, ms: number = 5000) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), ms);
@@ -81,17 +90,19 @@ async function searchArxiv(query: string) {
   return null;
 }
 
-// --- CLAUDE'S SELF-DEBUGGING PIPELINE ---
+// --- SELF-DEBUGGING PIPELINE ---
 const GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions";
 const PISTON_API_URL = "https://emkc.org/api/v2/piston/execute";
 const MAX_DEBUG_ROUNDS = 5;
 
-const SYSTEM_PROMPT = `You are the CS Hub AI, an expert coding assistant.
+const SYSTEM_PROMPT = `You are the CS Hub AI, an expert coding assistant for Kibabii University CS students.
+
 MANDATORY DEBUGGING WORKFLOW:
 1. Write your first attempt at the solution.
 2. You MUST call the execute_code tool to actually run it.
 3. Read the REAL output/error. Do not guess.
 4. If there is an error, FIX the code and call execute_code again. Repeat until correct.
+
 MANDATORY VERIFICATION:
 5. After passing execute_code, you MUST call stress_test_code for algorithmic problems. Write a simple brute-force solution and a random input generator.
 6. If stress_test_code reports mismatches, fix your algorithm and test again until 0 mismatches.
@@ -144,12 +155,18 @@ const PISTON_LANGUAGE_MAP: Record<string, { language: string; version: string }>
   javascript: { language: "javascript", version: "18.15.0" },
 };
 
+// FIX: runPiston now uses fetchWithTimeout instead of a plain fetch(),
+// so a hung sandbox request can't stall the whole API route forever.
 async function runPiston(language: string, version: string, code: string, stdin: string = "") {
-  const res = await fetch(PISTON_API_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ language, version, files: [{ content: code }], stdin }),
-  });
+  const res = await fetchWithTimeout(
+    PISTON_API_URL,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ language, version, files: [{ content: code }], stdin }),
+    },
+    15000 // 15s — sandbox execution can legitimately take longer than a simple API call
+  );
   if (!res.ok) throw new Error(`Sandbox failed with status ${res.status}`);
   const data = await res.json();
   return data.run || {};
@@ -168,14 +185,19 @@ async function executeCode(language: string, code: string, stdin: string = ""): 
 
 async function stressTestCode(args: any): Promise<string> {
   const trials = Math.min(Math.max(args.num_trials || 200, 1), 1000);
+  // FIX: removed the leading space before ${args.solution_code} and
+  // ${args.generator_code}. That single space was causing a real
+  // IndentationError in Python every time this ran (verified directly
+  // by executing the generated harness), meaning stress_test_code was
+  // silently broken before this fix.
   const harness = `
 import json
- ${args.solution_code}
+${args.solution_code}
 _solution_fn = ${args.function_name}
 _brute_ns = {}
 exec(${JSON.stringify(args.brute_force_code)}, _brute_ns)
 _brute_fn = _brute_ns[${JSON.stringify(args.function_name)}]
- ${args.generator_code}
+${args.generator_code}
 mismatches = []
 errors = []
 for i in range(${trials}):
@@ -200,20 +222,39 @@ print(json.dumps({"trials": ${trials}, "mismatches": len(mismatches), "mismatche
   }
 }
 
+// FIX: added a timeout (was completely missing before — the single
+// biggest suspect for "unable to fetch response" given the multi-round
+// loop this function sits inside). Also switched the hardcoded
+// "llama-3.1-8b-instant" to an env-configurable GLM-5.2 model id, and
+// added a clear error if GROQ_API_KEY isn't set instead of silently
+// sending "Bearer undefined".
 async function callGroq(messages: any[]) {
-  const res = await fetch(GROQ_API_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${process.env.GROQ_API_KEY}` },
-    body: JSON.stringify({
-      model: "llama-3.1-8b-instant", 
-      messages,
-      tools: TOOLS,
-      tool_choice: "auto",
-      temperature: 0.15,
-      max_tokens: 4000,
-    }),
-  });
-  if (!res.ok) throw new Error(`Groq API error (${res.status})`);
+  if (!process.env.GROQ_API_KEY) {
+    throw new Error("GROQ_API_KEY is not set in environment variables");
+  }
+
+  const res = await fetchWithTimeout(
+    GROQ_API_URL,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${process.env.GROQ_API_KEY}` },
+      body: JSON.stringify({
+        // IMPORTANT: verify this exact model id in your Groq console/docs.
+        // Set GROQ_GLM_MODEL in your environment to override if needed.
+        model: process.env.GROQ_GLM_MODEL || "glm-5.2",
+        messages,
+        tools: TOOLS,
+        tool_choice: "auto",
+        temperature: 0.15,
+        max_tokens: 4000,
+      }),
+    },
+    20000 // 20s — reasoning models can be slower than "instant" models
+  );
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`Groq API error (${res.status}): ${text}`);
+  }
   return res.json();
 }
 
@@ -310,8 +351,15 @@ export async function POST(req: Request) {
               { role: "system", content: `You searched 6 sources for "${query}". Results:\n\n${searchContext}\n\nSummarize and cite sources.` },
               { role: "user", content: query }
             ];
-            const synthRes = await callGroq(synthesizeMessages);
-            aiText = synthRes.choices[0].message.content;
+            try {
+              const synthRes = await callGroq(synthesizeMessages);
+              // FIX: guard against an empty/undefined choices array
+              // instead of crashing on synthRes.choices[0].message.content.
+              aiText = synthRes.choices?.[0]?.message?.content
+                || `I found some results for "${query}" but couldn't summarize them. Please try again.`;
+            } catch (e: any) {
+              aiText = `I found results for "${query}" but the summarizer failed: ${e.message}`;
+            }
           } else {
             aiText = `I searched for "${query}", but couldn't find a direct answer.`;
           }
@@ -347,6 +395,13 @@ export async function POST(req: Request) {
         const response = await callGroq(groqMessages);
         const message = response.choices?.[0]?.message;
 
+        // FIX: guard against Groq returning an empty choices array,
+        // which previously crashed on message.tool_calls.
+        if (!message) {
+          aiText = "The AI service returned an unexpected empty response. Please try again.";
+          break;
+        }
+
         if (message.tool_calls && message.tool_calls.length > 0) {
           groqMessages.push(message);
           for (const toolCall of message.tool_calls) {
@@ -372,7 +427,7 @@ export async function POST(req: Request) {
       
       if (!aiText) aiText = "I tried to solve this but couldn't verify it properly. Here is my best attempt.";
 
-      // Run Claude's hallucination check!
+      // Run the hallucination check
       const verificationCheck = checkForUnverifiedClaims(aiText, executionLog);
       if (verificationCheck.flagged) {
         aiText = `${aiText}\n\n${verificationCheck.note}`;
@@ -387,7 +442,8 @@ export async function POST(req: Request) {
         ...recentMessages.map((m: any) => ({ role: m.role === "assistant" ? "assistant" : "user", content: m.content.includes("data:image") ? "[Image]" : m.content }))
       ];
       const response = await callGroq(aiMessages);
-      aiText = response.choices[0].message.content;
+      // FIX: guard against empty choices here too.
+      aiText = response.choices?.[0]?.message?.content || "I couldn't generate a response. Please try again.";
     }
 
     const lowerAiText = aiText.toLowerCase();
@@ -430,8 +486,8 @@ export async function POST(req: Request) {
     });
 
     return new Response(customStream, { headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' } });
-  } catch (error) {
+  } catch (error: any) {
     console.error("Chat API Error:", error);
-    return new Response(JSON.stringify({ error: "Internal Server Error" }), { status: 500 });
+    return new Response(JSON.stringify({ error: "Internal Server Error", details: error.message }), { status: 500 });
   }
 }
