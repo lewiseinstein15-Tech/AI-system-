@@ -5,10 +5,6 @@ import { createOpenAI } from "@ai-sdk/openai";
 import { streamText } from "ai";
 import { Sandbox } from "@vercel/sandbox";
 
-// ============================================================
-// PROVIDER FALLBACK
-// ============================================================
-
 const PROVIDERS = [
   { name: "Cerebras", baseURL: "https://api.cerebras.ai/v1", key: "CEREBRAS_API_KEY", model: process.env.CEREBRAS_MODEL_ID || "gpt-oss-120b" },
   { name: "Groq", baseURL: "https://api.groq.com/openai/v1", key: "GROQ_API_KEY", model: process.env.GROQ_MODEL_ID || "openai/gpt-oss-20b" },
@@ -56,10 +52,6 @@ async function fetchTimeout(url: string, opts: any = {}, ms = 5000) {
   }
 }
 
-// ============================================================
-// CODE EXECUTION — Vercel Sandbox
-// ============================================================
-
 async function executeJs(code: string): Promise<{ ok: boolean; stdout: string; stderr: string; unavailable?: boolean }> {
   let sandbox;
   try {
@@ -70,27 +62,16 @@ async function executeJs(code: string): Promise<{ ok: boolean; stdout: string; s
       timeout: 15000,
       runtime: "node22",
     });
-
-    await sandbox.writeFiles([
-      { path: "main.js", content: Buffer.from(code) },
-    ]);
-
-    const result = await sandbox.runCommand({
-      cmd: "node",
-      args: ["main.js"],
-    });
-
+    await sandbox.writeFiles([{ path: "main.js", content: Buffer.from(code) }]);
+    const result = await sandbox.runCommand({ cmd: "node", args: ["main.js"] });
     const stdout = (await result.stdout()).trim();
     const stderr = (await result.stderr()).trim();
-
     return { ok: result.exitCode === 0, stdout, stderr };
   } catch (e: any) {
     return { ok: false, stdout: "", stderr: `Sandbox error: ${e.message}`, unavailable: true };
   } finally {
     if (sandbox) {
-      try {
-        await sandbox.stop();
-      } catch {}
+      try { await sandbox.stop(); } catch {}
     }
   }
 }
@@ -101,10 +82,6 @@ function extractCode(text: string): string | null {
   const g = text.match(/```\s*([\s\S]*?)```/);
   return g ? g[1].trim() : null;
 }
-
-// ============================================================
-// SEARCH HELPERS
-// ============================================================
 
 async function searchWiki(q: string) {
   try {
@@ -170,10 +147,6 @@ async function searchArxiv(q: string) {
   return null;
 }
 
-// ============================================================
-// CLAIM EXTRACTION & VERIFICATION LAYER
-// ============================================================
-
 interface Claim {
   text: string;
   type: "price" | "percentage" | "citation" | "statistic" | "attribution";
@@ -181,14 +154,12 @@ interface Claim {
 
 function extractClaims(text: string): Claim[] {
   const claims: Claim[] = [];
-  
   const priceRegex = /\$\d{1,3}(?:,\d{3})+(?:\.\d+)?(?:\s*(?:million|billion|yr|year|per year|\/yr))?/gi;
   let match;
   while ((match = priceRegex.exec(text)) !== null) {
     const context = text.substring(Math.max(0, match.index - 50), Math.min(text.length, match.index + 50));
     claims.push({ text: `${match[0]} (${context.trim()})`, type: "price" });
   }
-  
   const pctRegex = /\d{1,3}(?:\.\d+)?%/g;
   while ((match = pctRegex.exec(text)) !== null) {
     const context = text.substring(Math.max(0, match.index - 40), Math.min(text.length, match.index + 40));
@@ -196,22 +167,18 @@ function extractClaims(text: string): Claim[] {
       claims.push({ text: `${match[0]} (${context.trim()})`, type: "percentage" });
     }
   }
-  
   const citeRegex = /([A-Z][a-z]+(?:\s+(?:&|and)\s+[A-Z][a-z]+)?(?:\s+et\s+al\.?)?)\s*\(\d{4}\)/g;
   while ((match = citeRegex.exec(text)) !== null) {
     claims.push({ text: match[0], type: "citation" });
   }
-  
   const statRegex = /(\d+(?:,\d{3})*(?:\.\d+)?)\s+(?:patients|participants|subjects|studies|trials|cases)\s+(?:from|in|per|across)/gi;
   while ((match = statRegex.exec(text)) !== null) {
     claims.push({ text: match[0], type: "statistic" });
   }
-  
   const attrRegex = /(?:according to|per|from|via|source[d]?:)\s+([A-Z][\w\s&]+?)(?:\s+\d{4}|\s*\n|$)/gi;
   while ((match = attrRegex.exec(text)) !== null) {
     claims.push({ text: match[1].trim(), type: "attribution" });
   }
-  
   const seen = new Set();
   return claims.filter(c => {
     if (seen.has(c.text)) return false;
@@ -231,18 +198,11 @@ interface VerificationResult {
 async function verifyClaim(claim: Claim): Promise<VerificationResult> {
   const searchQuery = claim.text.replace(/\s+/g, " ").substring(0, 100);
   const sources: string[] = [];
-  
-  const [wiki, ddg] = await Promise.all([
-    searchWiki(searchQuery),
-    searchDdg(searchQuery),
-  ]);
-  
+  const [wiki, ddg] = await Promise.all([searchWiki(searchQuery), searchDdg(searchQuery)]);
   if (wiki) sources.push(truncate(wiki, 150) || "");
   if (ddg) sources.push(truncate(ddg, 150) || "");
-  
   let status: VerificationResult["status"] = "unverified";
   let note: string | undefined;
-  
   if (sources.length === 0) {
     status = "unverified";
     note = "No live sources found";
@@ -262,26 +222,16 @@ async function verifyClaim(claim: Claim): Promise<VerificationResult> {
       status = "verified";
     }
   }
-  
-  return {
-    claim: claim.text,
-    type: claim.type,
-    status,
-    sources: sources.filter(Boolean),
-    note,
-  };
+  return { claim: claim.text, type: claim.type, status, sources: sources.filter(Boolean), note };
 }
 
 function buildVerificationFooter(results: VerificationResult[]): string {
   if (results.length === 0) return "";
-  
   const verified = results.filter(r => r.status === "verified");
   const uncertain = results.filter(r => r.status === "uncertain");
   const unverified = results.filter(r => r.status === "unverified");
   const contradicted = results.filter(r => r.status === "contradicted");
-  
   let footer = "\n\n---\n";
-  
   if (contradicted.length > 0) {
     footer += `🔴 **${contradicted.length} claim(s) contradicted by live sources**\n`;
   } else if (unverified.length > 0) {
@@ -291,30 +241,18 @@ function buildVerificationFooter(results: VerificationResult[]): string {
   } else {
     footer += `🟢 **All ${verified.length} verifiable claim(s) matched live sources**\n`;
   }
-  
   footer += "\n<details>\n<summary>Verification details</summary>\n\n";
-  
   for (const r of results) {
     const icon = r.status === "verified" ? "🟢" : r.status === "contradicted" ? "🔴" : "🟡";
     footer += `${icon} **${r.type.toUpperCase()}**: "${truncate(r.claim, 80)}"\n`;
-    if (r.sources.length > 0) {
-      footer += `   Sources: ${r.sources.join(" | ")}\n`;
-    }
-    if (r.note) {
-      footer += `   Note: ${r.note}\n`;
-    }
+    if (r.sources.length > 0) footer += `   Sources: ${r.sources.join(" | ")}\n`;
+    if (r.note) footer += `   Note: ${r.note}\n`;
     footer += "\n";
   }
-  
   footer += "</details>\n";
   footer += `\n*Verified at ${new Date().toISOString()} against Wikipedia, DuckDuckGo, and other live sources. Always independently verify critical claims.*`;
-  
   return footer;
 }
-
-// ============================================================
-// MAIN ROUTE
-// ============================================================
 
 export async function POST(req: Request) {
   try {
@@ -337,7 +275,6 @@ export async function POST(req: Request) {
       data: { conversationId: convId, role: "user", content: userPrompt },
     });
 
-    // --- SEARCH MODE (explicit user request) ---
     const isSearch =
       lowerPrompt.startsWith("search for") ||
       lowerPrompt.includes("search the web") ||
@@ -414,7 +351,6 @@ export async function POST(req: Request) {
       return new Response(stream, { headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" } });
     }
 
-    // --- CODING MODE ---
     const isCoding =
       lowerPrompt.includes("code") ||
       lowerPrompt.includes("algorithm") ||
@@ -540,7 +476,6 @@ Be concise. No extra text after the code block.`;
       return new Response(stream, { headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" } });
     }
 
-    // --- NORMAL CHAT (with auto-verification) ---
     const SYSTEM = `You are CS Hub AI, built by Lewis Einstein (AI/ML Engineer) at Kibabii University. Answer clearly in markdown. Only output action commands when EXPLICITLY asked:
 [ACTION:CREATE_FLASHCARD] Front: <text> | Back: <text>
 [ACTION:SAVE_NOTE] Title: <text> | Content: <text>
@@ -590,7 +525,6 @@ Be concise. No extra text after the code block.`;
           }
         }
 
-        // --- AUTO-VERIFICATION LAYER ---
         const claims = extractClaims(chatTxt);
         let verificationFooter = "";
         
@@ -618,7 +552,6 @@ Be concise. No extra text after the code block.`;
         ctrl.enqueue(enc.encode("data: [DONE]\n\n"));
         ctrl.close();
 
-        // Action commands + DB save
         const lt = chatTxt.toLowerCase();
         try {
           if ((lt.includes("action:create_flashcard") || (lowerPrompt.includes("create") && lowerPrompt.includes("flashcard"))) && !chatTxt.includes("[SAVED:FLASHCARD]")) {
