@@ -99,7 +99,7 @@ async function searchWiki(q: string) {
 async function searchDdg(q: string) {
   try {
     const r = await fetchTimeout(`https://api.duckduckgo.com/?q=${encodeURIComponent(q)}&format=json&no_html=1&skip_disambig=1`, {
-      headers: { Accept: "application/json", "User-Agent": "CSHubBot/1.0" },
+      headers: { Accept: "application/json", "User-Agent": "NoctryxBot/1.0" },
     });
     const d = await r.json();
     if (d.AbstractText) return `DuckDuckGo: ${d.AbstractText}`;
@@ -152,33 +152,49 @@ interface Claim {
   type: "price" | "percentage" | "citation" | "statistic" | "attribution";
 }
 
+function stripMarkdown(text: string): string {
+  return text
+    .replace(/\|/g, " ")
+    .replace(/[*#_`]/g, "")
+    .replace(/\n/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function extractClaims(text: string): Claim[] {
   const claims: Claim[] = [];
+  const cleanText = stripMarkdown(text);
+
   const priceRegex = /\$\d{1,3}(?:,\d{3})+(?:\.\d+)?(?:\s*(?:million|billion|yr|year|per year|\/yr))?/gi;
   let match;
-  while ((match = priceRegex.exec(text)) !== null) {
-    const context = text.substring(Math.max(0, match.index - 50), Math.min(text.length, match.index + 50));
+  while ((match = priceRegex.exec(cleanText)) !== null) {
+    const context = cleanText.substring(Math.max(0, match.index - 40), Math.min(cleanText.length, match.index + 40));
     claims.push({ text: `${match[0]} (${context.trim()})`, type: "price" });
   }
+
   const pctRegex = /\d{1,3}(?:\.\d+)?%/g;
-  while ((match = pctRegex.exec(text)) !== null) {
-    const context = text.substring(Math.max(0, match.index - 40), Math.min(text.length, match.index + 40));
+  while ((match = pctRegex.exec(cleanText)) !== null) {
+    const context = cleanText.substring(Math.max(0, match.index - 30), Math.min(cleanText.length, match.index + 30));
     if (/from|per|in|of|rate|probability|chance/i.test(context)) {
       claims.push({ text: `${match[0]} (${context.trim()})`, type: "percentage" });
     }
   }
+
   const citeRegex = /([A-Z][a-z]+(?:\s+(?:&|and)\s+[A-Z][a-z]+)?(?:\s+et\s+al\.?)?)\s*\(\d{4}\)/g;
-  while ((match = citeRegex.exec(text)) !== null) {
+  while ((match = citeRegex.exec(cleanText)) !== null) {
     claims.push({ text: match[0], type: "citation" });
   }
+
   const statRegex = /(\d+(?:,\d{3})*(?:\.\d+)?)\s+(?:patients|participants|subjects|studies|trials|cases)\s+(?:from|in|per|across)/gi;
-  while ((match = statRegex.exec(text)) !== null) {
+  while ((match = statRegex.exec(cleanText)) !== null) {
     claims.push({ text: match[0], type: "statistic" });
   }
-  const attrRegex = /(?:according to|per|from|via|source[d]?:)\s+([A-Z][\w\s&]+?)(?:\s+\d{4}|\s*\n|$)/gi;
-  while ((match = attrRegex.exec(text)) !== null) {
+
+  const attrRegex = /(?:according to|per|from|via|source[d]?:)\s+([A-Z][\w\s&]+?)(?:\s+\d{4}|\s*$)/gi;
+  while ((match = attrRegex.exec(cleanText)) !== null) {
     claims.push({ text: match[1].trim(), type: "attribution" });
   }
+
   const seen = new Set();
   return claims.filter(c => {
     if (seen.has(c.text)) return false;
@@ -187,25 +203,63 @@ function extractClaims(text: string): Claim[] {
   });
 }
 
+function cleanClaimForSearch(text: string): string {
+  return text
+    .replace(/\s+/g, " ")
+    .replace(/[|*#_`]/g, "")
+    .replace(/\s*\([^)]{0,40}\)\s*/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function normalizePriceClaim(text: string): string {
+  const drugMatch = text.match(/(lecanemab|Leqembi|aducanumab|Aduhelm|ozempic|wegovy|mounjaro|zepbound)/i);
+  const priceMatch = text.match(/\$\d{1,3}(?:,\d{3})+/);
+  if (drugMatch && priceMatch) {
+    return `${drugMatch[1]} ${priceMatch[0]} price per year`;
+  }
+  return text;
+}
+
 interface VerificationResult {
   claim: string;
   type: string;
-  status: "verified" | "unverified" | "contradicted" | "uncertain";
+  status: "verified" | "unverified" | "contradicted" | "uncertain" | "search-failed";
   sources: string[];
   note?: string;
 }
 
 async function verifyClaim(claim: Claim): Promise<VerificationResult> {
-  const searchQuery = claim.text.replace(/\s+/g, " ").substring(0, 100);
+  let searchQuery = cleanClaimForSearch(claim.text);
+
+  if (claim.type === "price") {
+    searchQuery = normalizePriceClaim(searchQuery);
+  }
+
+  searchQuery = searchQuery.substring(0, 100);
   const sources: string[] = [];
-  const [wiki, ddg] = await Promise.all([searchWiki(searchQuery), searchDdg(searchQuery)]);
-  if (wiki) sources.push(truncate(wiki, 150) || "");
-  if (ddg) sources.push(truncate(ddg, 150) || "");
+  let searchError = false;
+
+  try {
+    const [wiki, ddg] = await Promise.all([
+      searchWiki(searchQuery),
+      searchDdg(searchQuery),
+    ]);
+    if (wiki) sources.push(truncate(wiki, 150) || "");
+    if (ddg) sources.push(truncate(ddg, 150) || "");
+  } catch (e) {
+    searchError = true;
+  }
+
   let status: VerificationResult["status"] = "unverified";
   let note: string | undefined;
-  if (sources.length === 0) {
+
+  if (searchError) {
+    status = "search-failed";
+    note = "Search APIs returned an error or timed out";
+  } else if (sources.length === 0) {
     status = "unverified";
-    note = "No live sources found";
+    note = "No live sources found — claim may be correct but not indexed by search APIs";
   } else {
     const combined = sources.join(" ").toLowerCase();
     const hasNumbers = /\d/.test(claim.text);
@@ -222,18 +276,31 @@ async function verifyClaim(claim: Claim): Promise<VerificationResult> {
       status = "verified";
     }
   }
-  return { claim: claim.text, type: claim.type, status, sources: sources.filter(Boolean), note };
+
+  return {
+    claim: claim.text,
+    type: claim.type,
+    status,
+    sources: sources.filter(Boolean),
+    note,
+  };
 }
 
 function buildVerificationFooter(results: VerificationResult[]): string {
   if (results.length === 0) return "";
+
   const verified = results.filter(r => r.status === "verified");
   const uncertain = results.filter(r => r.status === "uncertain");
   const unverified = results.filter(r => r.status === "unverified");
   const contradicted = results.filter(r => r.status === "contradicted");
+  const searchFailed = results.filter(r => r.status === "search-failed");
+
   let footer = "\n\n---\n";
+
   if (contradicted.length > 0) {
     footer += `🔴 **${contradicted.length} claim(s) contradicted by live sources**\n`;
+  } else if (searchFailed.length > 0) {
+    footer += `⚠️ **${searchFailed.length} claim(s) could not be checked** — search APIs failed\n`;
   } else if (unverified.length > 0) {
     footer += `🟡 **${unverified.length} claim(s) unverified** — no live sources found\n`;
   } else if (uncertain.length > 0) {
@@ -241,16 +308,20 @@ function buildVerificationFooter(results: VerificationResult[]): string {
   } else {
     footer += `🟢 **All ${verified.length} verifiable claim(s) matched live sources**\n`;
   }
+
   footer += "\n<details>\n<summary>Verification details</summary>\n\n";
+
   for (const r of results) {
-    const icon = r.status === "verified" ? "🟢" : r.status === "contradicted" ? "🔴" : "🟡";
+    const icon = r.status === "verified" ? "🟢" : r.status === "contradicted" ? "🔴" : r.status === "search-failed" ? "⚠️" : "🟡";
     footer += `${icon} **${r.type.toUpperCase()}**: "${truncate(r.claim, 80)}"\n`;
     if (r.sources.length > 0) footer += `   Sources: ${r.sources.join(" | ")}\n`;
     if (r.note) footer += `   Note: ${r.note}\n`;
     footer += "\n";
   }
+
   footer += "</details>\n";
   footer += `\n*Verified at ${new Date().toISOString()} against Wikipedia, DuckDuckGo, and other live sources. Always independently verify critical claims.*`;
+
   return footer;
 }
 
@@ -476,7 +547,15 @@ Be concise. No extra text after the code block.`;
       return new Response(stream, { headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" } });
     }
 
-    const SYSTEM = `You are CS Hub AI, built by Lewis Einstein (AI/ML Engineer) at Kibabii University. Answer clearly in markdown. Only output action commands when EXPLICITLY asked:
+    const SYSTEM = `You are Noctryx AI, a sophisticated AI system forged through countless iterations, built to assist with real-world problems through precision, persistence, and relentless refinement.
+
+Your origin: "Built through persistence. Refined by knowledge. Every failure became an improvement. Forged through countless iterations. Precision earned, not inherited."
+
+If asked your name, respond: "I am Noctryx AI."
+
+If asked who built you, respond: "I was built by Lewis Einstein, an AI/ML Engineer at Kibabii University, through countless researches and extensive training to assist you."
+
+Answer clearly in markdown. Only output action commands when EXPLICITLY asked:
 [ACTION:CREATE_FLASHCARD] Front: <text> | Back: <text>
 [ACTION:SAVE_NOTE] Title: <text> | Content: <text>
 [ACTION:CREATE_ASSIGNMENT] Title: <text> | Due: <YYYY-MM-DDTHH:MM:SS>`;
@@ -527,22 +606,22 @@ Be concise. No extra text after the code block.`;
 
         const claims = extractClaims(chatTxt);
         let verificationFooter = "";
-        
-        const hasHighStakesClaims = claims.some(c => 
-          c.type === "price" || 
-          c.type === "citation" || 
+
+        const hasHighStakesClaims = claims.some(c =>
+          c.type === "price" ||
+          c.type === "citation" ||
           (c.type === "percentage" && /approval|probability|chance|rate/i.test(c.text))
         );
-        
+
         if (autoVerify || hasHighStakesClaims) {
           ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ status: "🔎 Checking claims against live sources..." })}\n\n`));
-          
+
           const results = await Promise.all(
             claims.slice(0, 5).map(c => verifyClaim(c))
           );
-          
+
           verificationFooter = buildVerificationFooter(results);
-          
+
           if (verificationFooter) {
             ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: verificationFooter } }] })}\n\n`));
             chatTxt += verificationFooter;
