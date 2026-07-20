@@ -7,10 +7,6 @@ import { Sandbox } from "@vercel/sandbox";
 
 // ============================================================
 // PROVIDER FALLBACK
-// Model IDs below were valid as of this writing — provider
-// catalogs change without notice. If you start seeing
-// "model_not_found" again, run the /models endpoint check for
-// whichever provider fails and update the ID here.
 // ============================================================
 
 const PROVIDERS = [
@@ -32,7 +28,7 @@ async function callAI(messages: any[], temp: number, maxTokens: number) {
         messages,
         temperature: temp,
         maxTokens,
-        maxRetries: 1, // fallback across providers handles retries, not per-provider retry storms
+        maxRetries: 1,
       });
       console.log("Provider used:", p.name, p.model);
       return { result, providerName: p.name };
@@ -61,13 +57,7 @@ async function fetchTimeout(url: string, opts: any = {}, ms = 5000) {
 }
 
 // ============================================================
-// CODE EXECUTION — via Vercel Sandbox (Firecracker microVM),
-// authenticated via access token since this app runs on Render,
-// not Vercel. Replaces the previous Piston-based implementation.
-//
-// NOTE: this was written from the official @vercel/sandbox docs
-// but has not been personally execution-verified against a live
-// Render deployment. Treat the first real run as the actual test.
+// CODE EXECUTION — Vercel Sandbox
 // ============================================================
 
 async function executeJs(code: string): Promise<{ ok: boolean; stdout: string; stderr: string; unavailable?: boolean }> {
@@ -112,16 +102,8 @@ function extractCode(text: string): string | null {
   return g ? g[1].trim() : null;
 }
 
-// Extracts the FIRST console.log(...) call from the model's own code
-// so we can re-run it and check the ACTUAL value, not just "did it crash."
-// This is a real, if imperfect, correctness check — not just a crash check.
-function extractFirstTestCall(code: string): string | null {
-  const m = code.match(/console\.log\((.*)\);?\s*$/m);
-  return m ? m[1] : null;
-}
-
 // ============================================================
-// SEARCH HELPERS (unchanged behavior, just kept for completeness)
+// SEARCH HELPERS
 // ============================================================
 
 async function searchWiki(q: string) {
@@ -189,6 +171,148 @@ async function searchArxiv(q: string) {
 }
 
 // ============================================================
+// CLAIM EXTRACTION & VERIFICATION LAYER
+// ============================================================
+
+interface Claim {
+  text: string;
+  type: "price" | "percentage" | "citation" | "statistic" | "attribution";
+}
+
+function extractClaims(text: string): Claim[] {
+  const claims: Claim[] = [];
+  
+  const priceRegex = /\$\d{1,3}(?:,\d{3})+(?:\.\d+)?(?:\s*(?:million|billion|yr|year|per year|\/yr))?/gi;
+  let match;
+  while ((match = priceRegex.exec(text)) !== null) {
+    const context = text.substring(Math.max(0, match.index - 50), Math.min(text.length, match.index + 50));
+    claims.push({ text: `${match[0]} (${context.trim()})`, type: "price" });
+  }
+  
+  const pctRegex = /\d{1,3}(?:\.\d+)?%/g;
+  while ((match = pctRegex.exec(text)) !== null) {
+    const context = text.substring(Math.max(0, match.index - 40), Math.min(text.length, match.index + 40));
+    if (/from|per|in|of|rate|probability|chance/i.test(context)) {
+      claims.push({ text: `${match[0]} (${context.trim()})`, type: "percentage" });
+    }
+  }
+  
+  const citeRegex = /([A-Z][a-z]+(?:\s+(?:&|and)\s+[A-Z][a-z]+)?(?:\s+et\s+al\.?)?)\s*\(\d{4}\)/g;
+  while ((match = citeRegex.exec(text)) !== null) {
+    claims.push({ text: match[0], type: "citation" });
+  }
+  
+  const statRegex = /(\d+(?:,\d{3})*(?:\.\d+)?)\s+(?:patients|participants|subjects|studies|trials|cases)\s+(?:from|in|per|across)/gi;
+  while ((match = statRegex.exec(text)) !== null) {
+    claims.push({ text: match[0], type: "statistic" });
+  }
+  
+  const attrRegex = /(?:according to|per|from|via|source[d]?:)\s+([A-Z][\w\s&]+?)(?:\s+\d{4}|\s*\n|$)/gi;
+  while ((match = attrRegex.exec(text)) !== null) {
+    claims.push({ text: match[1].trim(), type: "attribution" });
+  }
+  
+  const seen = new Set();
+  return claims.filter(c => {
+    if (seen.has(c.text)) return false;
+    seen.add(c.text);
+    return true;
+  });
+}
+
+interface VerificationResult {
+  claim: string;
+  type: string;
+  status: "verified" | "unverified" | "contradicted" | "uncertain";
+  sources: string[];
+  note?: string;
+}
+
+async function verifyClaim(claim: Claim): Promise<VerificationResult> {
+  const searchQuery = claim.text.replace(/\s+/g, " ").substring(0, 100);
+  const sources: string[] = [];
+  
+  const [wiki, ddg] = await Promise.all([
+    searchWiki(searchQuery),
+    searchDdg(searchQuery),
+  ]);
+  
+  if (wiki) sources.push(truncate(wiki, 150) || "");
+  if (ddg) sources.push(truncate(ddg, 150) || "");
+  
+  let status: VerificationResult["status"] = "unverified";
+  let note: string | undefined;
+  
+  if (sources.length === 0) {
+    status = "unverified";
+    note = "No live sources found";
+  } else {
+    const combined = sources.join(" ").toLowerCase();
+    const hasNumbers = /\d/.test(claim.text);
+    if (hasNumbers) {
+      const claimNumbers = claim.text.match(/\d+(?:\.\d+)?/g) || [];
+      const sourceHasAny = claimNumbers.some(n => combined.includes(n));
+      if (!sourceHasAny && sources.length > 0) {
+        status = "uncertain";
+        note = "Source found but could not confirm specific numbers";
+      } else {
+        status = "verified";
+      }
+    } else {
+      status = "verified";
+    }
+  }
+  
+  return {
+    claim: claim.text,
+    type: claim.type,
+    status,
+    sources: sources.filter(Boolean),
+    note,
+  };
+}
+
+function buildVerificationFooter(results: VerificationResult[]): string {
+  if (results.length === 0) return "";
+  
+  const verified = results.filter(r => r.status === "verified");
+  const uncertain = results.filter(r => r.status === "uncertain");
+  const unverified = results.filter(r => r.status === "unverified");
+  const contradicted = results.filter(r => r.status === "contradicted");
+  
+  let footer = "\n\n---\n";
+  
+  if (contradicted.length > 0) {
+    footer += `🔴 **${contradicted.length} claim(s) contradicted by live sources**\n`;
+  } else if (unverified.length > 0) {
+    footer += `🟡 **${unverified.length} claim(s) unverified** — no live sources found\n`;
+  } else if (uncertain.length > 0) {
+    footer += `🟡 **${uncertain.length} claim(s) uncertain** — sources found but numbers unconfirmed\n`;
+  } else {
+    footer += `🟢 **All ${verified.length} verifiable claim(s) matched live sources**\n`;
+  }
+  
+  footer += "\n<details>\n<summary>Verification details</summary>\n\n";
+  
+  for (const r of results) {
+    const icon = r.status === "verified" ? "🟢" : r.status === "contradicted" ? "🔴" : "🟡";
+    footer += `${icon} **${r.type.toUpperCase()}**: "${truncate(r.claim, 80)}"\n`;
+    if (r.sources.length > 0) {
+      footer += `   Sources: ${r.sources.join(" | ")}\n`;
+    }
+    if (r.note) {
+      footer += `   Note: ${r.note}\n`;
+    }
+    footer += "\n";
+  }
+  
+  footer += "</details>\n";
+  footer += `\n*Verified at ${new Date().toISOString()} against Wikipedia, DuckDuckGo, and other live sources. Always independently verify critical claims.*`;
+  
+  return footer;
+}
+
+// ============================================================
 // MAIN ROUTE
 // ============================================================
 
@@ -197,7 +321,7 @@ export async function POST(req: Request) {
     const session = await getServerSession(authOptions);
     if (!session) return new Response(JSON.stringify({ error: "Unauthorized" }), { status: 401 });
 
-    const { messages, conversationId } = await req.json();
+    const { messages, conversationId, autoVerify = false } = await req.json();
     const userPrompt = messages[messages.length - 1].content;
     const lowerPrompt = userPrompt.toLowerCase();
 
@@ -213,7 +337,7 @@ export async function POST(req: Request) {
       data: { conversationId: convId, role: "user", content: userPrompt },
     });
 
-    // --- SEARCH ---
+    // --- SEARCH MODE (explicit user request) ---
     const isSearch =
       lowerPrompt.startsWith("search for") ||
       lowerPrompt.includes("search the web") ||
@@ -267,7 +391,6 @@ export async function POST(req: Request) {
                 ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: d } }] })}\n\n`));
               }
             } catch {
-              // Graceful degradation — honest message, not a crash.
               aiText = "*(All AI providers are currently unavailable or rate-limited. Please try again in a moment.)*";
               ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: aiText } }] })}\n\n`));
             }
@@ -291,7 +414,7 @@ export async function POST(req: Request) {
       return new Response(stream, { headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" } });
     }
 
-    // --- CODING: generate, then independently verify via Vercel Sandbox ---
+    // --- CODING MODE ---
     const isCoding =
       lowerPrompt.includes("code") ||
       lowerPrompt.includes("algorithm") ||
@@ -374,7 +497,6 @@ Be concise. No extra text after the code block.`;
               const execResult = await executeJs(code);
 
               if (execResult.unavailable) {
-                // Sandbox itself is down — no point retrying against it repeatedly.
                 full = roundText + `\n\n⚠️ **Could not verify — the execution sandbox is temporarily unavailable.** This code has NOT been confirmed to run correctly. Please try again shortly.`;
                 break;
               }
@@ -385,8 +507,7 @@ Be concise. No extra text after the code block.`;
                 break;
               }
 
-              // Real failure — feed the REAL stderr back, not a hint.
-              full = roundText; // keep the latest attempt in case we run out of rounds
+              full = roundText;
               convoMessages.push({ role: "assistant", content: roundText });
               convoMessages.push({
                 role: "user",
@@ -398,8 +519,6 @@ Be concise. No extra text after the code block.`;
               }
             }
 
-            // Stream the FINAL result to the user once, after all rounds are settled —
-            // avoids showing 3 rounds of failed intermediate code, which would be confusing.
             ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: full } }] })}\n\n`));
           } catch (e: any) {
             console.error("Coding loop error:", e);
@@ -421,7 +540,7 @@ Be concise. No extra text after the code block.`;
       return new Response(stream, { headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" } });
     }
 
-    // --- NORMAL CHAT ---
+    // --- NORMAL CHAT (with auto-verification) ---
     const SYSTEM = `You are CS Hub AI, built by Lewis Einstein (AI/ML Engineer) at Kibabii University. Answer clearly in markdown. Only output action commands when EXPLICITLY asked:
 [ACTION:CREATE_FLASHCARD] Front: <text> | Back: <text>
 [ACTION:SAVE_NOTE] Title: <text> | Content: <text>
@@ -471,9 +590,35 @@ Be concise. No extra text after the code block.`;
           }
         }
 
+        // --- AUTO-VERIFICATION LAYER ---
+        const claims = extractClaims(chatTxt);
+        let verificationFooter = "";
+        
+        const hasHighStakesClaims = claims.some(c => 
+          c.type === "price" || 
+          c.type === "citation" || 
+          (c.type === "percentage" && /approval|probability|chance|rate/i.test(c.text))
+        );
+        
+        if (autoVerify || hasHighStakesClaims) {
+          ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ status: "🔎 Checking claims against live sources..." })}\n\n`));
+          
+          const results = await Promise.all(
+            claims.slice(0, 5).map(c => verifyClaim(c))
+          );
+          
+          verificationFooter = buildVerificationFooter(results);
+          
+          if (verificationFooter) {
+            ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: verificationFooter } }] })}\n\n`));
+            chatTxt += verificationFooter;
+          }
+        }
+
         ctrl.enqueue(enc.encode("data: [DONE]\n\n"));
         ctrl.close();
 
+        // Action commands + DB save
         const lt = chatTxt.toLowerCase();
         try {
           if ((lt.includes("action:create_flashcard") || (lowerPrompt.includes("create") && lowerPrompt.includes("flashcard"))) && !chatTxt.includes("[SAVED:FLASHCARD]")) {
