@@ -4,6 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { createOpenAI } from "@ai-sdk/openai";
 import { streamText } from "ai";
 import { Sandbox } from "@vercel/sandbox";
+import { GoogleGenerativeAI } from "@google/generative-ai";
 
 const PROVIDERS = [
   { name: "Cerebras", baseURL: "https://api.cerebras.ai/v1", key: "CEREBRAS_API_KEY", model: process.env.CEREBRAS_MODEL_ID || "gpt-oss-120b" },
@@ -12,6 +13,7 @@ const PROVIDERS = [
   { name: "Gemini", baseURL: "https://generativelanguage.googleapis.com/v1beta/openai", key: "GEMINI_API_KEY", model: process.env.GEMINI_MODEL_ID || "gemini-3.5-flash" },
 ];
 
+// Single provider with fallback chain
 async function callSingleAI(messages: any[], temp: number, maxTokens: number) {
   let lastErr: any = null;
   for (const p of PROVIDERS) {
@@ -24,7 +26,7 @@ async function callSingleAI(messages: any[], temp: number, maxTokens: number) {
         messages,
         temperature: temp,
         maxTokens,
-        maxRetries: 1,
+        maxRetries: 0,
       });
       console.log("Provider used:", p.name, p.model);
       return { result, providerName: p.name };
@@ -37,7 +39,8 @@ async function callSingleAI(messages: any[], temp: number, maxTokens: number) {
   throw new Error("All providers unavailable: " + (lastErr?.message || "unknown"));
 }
 
-async function callAllAI(messages: any[], temp: number, maxTokens: number): Promise<{ responses: string[]; providers: string[] }> {
+// Call ALL providers in parallel, return all successful responses
+async function callAllAI(messages: any[], temp: number, maxTokens: number, timeoutMs = 12000): Promise<{ responses: string[]; providers: string[] }> {
   const promises = PROVIDERS.map(async (p) => {
     const apiKey = process.env[p.key];
     if (!apiKey) return null;
@@ -48,7 +51,7 @@ async function callAllAI(messages: any[], temp: number, maxTokens: number): Prom
         messages,
         temperature: temp,
         maxTokens,
-        maxRetries: 1,
+        maxRetries: 0,
       });
       let text = "";
       for await (const d of result.textStream) {
@@ -62,26 +65,50 @@ async function callAllAI(messages: any[], temp: number, maxTokens: number): Prom
     }
   });
 
-  const results = await Promise.all(promises);
-  const valid = results.filter((r): r is { text: string; provider: string } => r !== null && r.text.length > 10);
+  // Wait for all with timeout
+  const timeoutPromise = new Promise<never>((_, reject) => 
+    setTimeout(() => reject(new Error("AI timeout")), timeoutMs)
+  );
+  
+  try {
+    const results = await Promise.race([
+      Promise.all(promises),
+      timeoutPromise
+    ]);
+    const valid = results.filter((r): r is { text: string; provider: string } => r !== null && r.text.length > 10);
+    
+    if (valid.length === 0) {
+      throw new Error("All providers unavailable in ensemble");
+    }
 
-  if (valid.length === 0) {
-    throw new Error("All providers unavailable in ensemble");
+    return {
+      responses: valid.map((r) => r.text),
+      providers: valid.map((r) => r.provider),
+    };
+  } catch (e) {
+    // Timeout - return whatever we have
+    const results = await Promise.all(promises.map(p => p.catch(() => null)));
+    const valid = results.filter((r): r is { text: string; provider: string } => r !== null && r.text.length > 10);
+    if (valid.length === 0) throw new Error("All providers unavailable in ensemble");
+    return {
+      responses: valid.map((r) => r.text),
+      providers: valid.map((r) => r.provider),
+    };
   }
-
-  return {
-    responses: valid.map((r) => r.text),
-    providers: valid.map((r) => r.provider),
-  };
 }
 
+// Synthesize multiple responses into one
 async function synthesizeResponses(responses: string[], userQuery: string, searchCtx: string): Promise<string> {
+  if (responses.length === 1) {
+    return responses[0];
+  }
+  
   const gemini = PROVIDERS.find((p) => p.name === "Gemini");
   if (!gemini || !process.env.GEMINI_API_KEY) {
     return responses.reduce((a, b) => (a.length > b.length ? a : b));
   }
 
-  const synthesisPrompt = `You are Noctryx AI. Multiple AI systems have analyzed the user's question. Synthesize their answers into ONE coherent, accurate response.
+  const synthesisPrompt = `You are Noctryx AI. Multiple AI systems have analyzed the user question. Synthesize their answers into ONE coherent, accurate response.
 
 RULES:
 - Do NOT mention that you used multiple AI models or providers.
@@ -104,8 +131,8 @@ Now write the final unified response:`;
       model: client(gemini.model),
       messages: [{ role: "user", content: synthesisPrompt }],
       temperature: 0.3,
-      maxTokens: 2500,
-      maxRetries: 1,
+      maxTokens: 2000,
+      maxRetries: 0,
     });
     let text = "";
     for await (const d of result.textStream) {
@@ -175,7 +202,7 @@ function truncate(str: string | null, max: number) {
   return str.length > max ? str.substring(0, max) + "..." : str;
 }
 
-async function fetchTimeout(url: string, opts: any = {}, ms = 5000) {
+async function fetchTimeout(url: string, opts: any = {}, ms = 3000) {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), ms);
   try {
@@ -289,15 +316,15 @@ async function searchTavily(q: string) {
       body: JSON.stringify({
         api_key: process.env.TAVILY_API_KEY,
         query: q,
-        max_results: 3,
+        max_results: 2,
         include_answer: true,
       }),
-    }, 8000);
+    }, 5000);
     const d = await r.json();
     let out = "";
     if (d.answer) out += `Summary: ${d.answer}\n`;
     if (d.results?.length) {
-      out += d.results.map((res: any) => `- ${res.title} (${res.url}): ${truncate(res.content, 200)}`).join("\n");
+      out += d.results.map((res: any) => `- ${res.title} (${res.url}): ${truncate(res.content, 150)}`).join("\n");
     }
     return out ? `Tavily Web Search: ${out}` : null;
   } catch {}
@@ -483,14 +510,14 @@ function buildVerificationFooter(results: VerificationResult[]): string {
 }
 
 async function analyzeImageWithGemini(base64Image: string, userQuestion: string): Promise<string> {
-  const gemini = PROVIDERS.find((p) => p.name === "Gemini");
-  if (!gemini || !process.env.GEMINI_API_KEY) {
+  if (!process.env.GEMINI_API_KEY) {
     throw new Error("Gemini API key required for vision analysis");
   }
 
-  const imageUrl = base64Image.startsWith("data:")
-    ? base64Image
-    : `data:image/jpeg;base64,${base64Image}`;
+  const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+  const model = genAI.getGenerativeModel({ 
+    model: process.env.GEMINI_MODEL_ID || "gemini-3.5-flash" 
+  });
 
   const visionPrompt = `You are Noctryx AI with live camera vision. The user has shared a photo from their camera and asked a question about what you see.
 
@@ -499,27 +526,13 @@ USER QUESTION: ${userQuestion}
 Describe what you see accurately. Be specific about objects, people, text, colors, and spatial relationships. If you cannot clearly see something, say so honestly.`;
 
   try {
-    const client = createOpenAI({ baseURL: gemini.baseURL, apiKey: process.env.GEMINI_API_KEY });
-    const result = await streamText({
-      model: client(gemini.model),
-      messages: [
-        {
-          role: "user",
-          content: [
-            { type: "text", text: visionPrompt },
-            { type: "image", image: imageUrl },
-          ],
-        },
-      ],
-      temperature: 0.4,
-      maxTokens: 1500,
-      maxRetries: 1,
-    });
-    let text = "";
-    for await (const d of result.textStream) {
-      text += d;
-    }
-    return text;
+    const result = await model.generateContent([
+      visionPrompt,
+      { inlineData: { data: base64Image, mimeType: "image/jpeg" } }
+    ]);
+    
+    const response = await result.response;
+    return response.text();
   } catch (e: any) {
     console.error("Vision analysis failed:", e.message);
     throw e;
@@ -738,8 +751,8 @@ Answer clearly in markdown. Only output action commands when EXPLICITLY asked:
         let chatTxt = "";
 
         try {
-          sendStatus("🔎 Searching live sources...");
-          const [tavily, wiki, ddg, hn, so, gh, arxiv] = await Promise.all([
+          // Start searches in background (non-blocking)
+          const searchPromise = Promise.allSettled([
             searchTavily(userPrompt),
             searchWiki(userPrompt),
             searchDdg(userPrompt),
@@ -749,43 +762,45 @@ Answer clearly in markdown. Only output action commands when EXPLICITLY asked:
             searchArxiv(userPrompt),
           ]);
 
-          let searchCtx = "";
-          if (tavily) searchCtx += `[Tavily] ${truncate(tavily, 600)}\n\n`;
-          if (wiki) searchCtx += `[Wikipedia] ${truncate(wiki, 300)}\n\n`;
-          if (ddg) searchCtx += `[DuckDuckGo] ${truncate(ddg, 300)}\n\n`;
-          if (hn) searchCtx += `[Hacker News] ${truncate(hn, 300)}\n\n`;
-          if (so) searchCtx += `[StackOverflow] ${truncate(so, 300)}\n\n`;
-          if (gh) searchCtx += `[GitHub] ${truncate(gh, 300)}\n\n`;
-          if (arxiv) searchCtx += `[arXiv] ${truncate(arxiv, 300)}\n\n`;
+          // Call ALL AI providers in parallel (ensemble)
+          sendStatus("🧠 Accessing AI brain...");
+          const aiMessages = [
+            { role: "system", content: SYSTEM },
+            ...messages.slice(-6).map((m: any) => ({
+              role: m.role === "assistant" ? "assistant" : "user",
+              content: m.content.includes("data:image") ? "[Image]" : m.content,
+            })),
+          ];
 
-          const systemWithSearch = searchCtx
-            ? `${SYSTEM}\n\n---\nLive search results for this query (use if relevant, cite sources):\n\n${searchCtx}`
-            : SYSTEM;
+          const { responses: aiResponses, providers } = await callAllAI(aiMessages, 0.5, 2000);
 
-          sendStatus("🧠 Consulting multiple AI models...");
-          const { responses: aiResponses } = await callAllAI(
-            [
-              { role: "system", content: systemWithSearch },
-              ...messages.slice(-6).map((m: any) => ({
-                role: m.role === "assistant" ? "assistant" : "user",
-                content: m.content.includes("data:image") ? "[Image]" : m.content,
-              })),
-            ],
-            0.5,
-            2000
-          );
-
+          // Synthesize all responses into one
           sendStatus("🔄 Synthesizing best answer...");
+          
+          // Get search results if available
+          const searchResults = await searchPromise;
+          let searchCtx = "";
+          const [tavily, wiki, ddg, hn, so, gh, arxiv] = searchResults.map(r => r.status === 'fulfilled' ? r.value : null);
+          
+          if (tavily) searchCtx += `[Tavily] ${truncate(tavily, 400)}\n\n`;
+          if (wiki) searchCtx += `[Wikipedia] ${truncate(wiki, 200)}\n\n`;
+          if (ddg) searchCtx += `[DuckDuckGo] ${truncate(ddg, 200)}\n\n`;
+          if (hn) searchCtx += `[Hacker News] ${truncate(hn, 200)}\n\n`;
+          if (so) searchCtx += `[StackOverflow] ${truncate(so, 200)}\n\n`;
+          if (gh) searchCtx += `[GitHub] ${truncate(gh, 200)}\n\n`;
+          if (arxiv) searchCtx += `[arXiv] ${truncate(arxiv, 200)}\n\n`;
+
           const synthesized = await synthesizeResponses(aiResponses, userPrompt, searchCtx);
           chatTxt = synthesized;
 
-          const words = synthesized.split(" ");
+          // Stream the final synthesized response
+          const words = chatTxt.split(" ");
           for (const word of words) {
             ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: word + " " } }] })}\n\n`));
           }
         } catch (e: any) {
-          console.error("Ensemble error:", e);
-          const fallback = "*(All AI providers are currently unavailable or rate-limited. Please try again in a moment.)*";
+          console.error("Chat error:", e);
+          const fallback = "*(AI response unavailable. Please try again.)*";
           chatTxt = fallback;
           ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: fallback } }] })}\n\n`));
         }
