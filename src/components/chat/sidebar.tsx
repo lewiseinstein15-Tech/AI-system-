@@ -55,7 +55,7 @@ export function Sidebar({ onConversationSelect }: { onConversationSelect: (id: s
   return (
     <div className="flex h-full w-72 flex-col border-r border-border bg-accent/20 backdrop-blur-sm">
       <div className="flex items-center justify-between p-4 border-b border-border">
-        <h1 className="text-xl font-bold text-primary">CS Hub AI</h1>
+        <h1 className="text-xl font-bold text-primary">Noctryx AI</h1>
         <Button variant="ghost" size="icon">
           <Plus className="h-5 w-5" />
         </Button>
