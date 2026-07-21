@@ -91,7 +91,7 @@ export function ChatMessage({ role, content, isStreaming, searchSteps }: ChatMes
       </div>
       <div className="flex-1 overflow-hidden min-w-0" style={{ maxWidth: "calc(100% - 48px)" }}>
         <div className="mb-1 flex items-center gap-2">
-          <span className="text-sm font-semibold font-mono">{isIncoming ? "CS Hub AI" : "You"}</span>
+          <span className="text-sm font-semibold font-mono">{isIncoming ? "Noctryx AI" : "You"}</span>
           {isIncoming && !isStreaming && (
             <div className="flex items-center gap-1">
               <button
