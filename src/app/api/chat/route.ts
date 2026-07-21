@@ -834,7 +834,7 @@ Additional constraints:
           sendStatus("🧠 Accessing AI brain...");
           const aiMessages = [
             { role: "system", content: systemWithSearch },
-n            ...messages.slice(-6).map((m: any) => ({
+            ...messages.slice(-6).map((m: any) => ({
               role: m.role === "assistant" ? "assistant" : "user",
               content: m.content.includes("data:image") ? "[Image]" : m.content,
             })),
