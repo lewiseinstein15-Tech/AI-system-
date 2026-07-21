@@ -65,7 +65,6 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
           </button>
         </div>
 
-        {/* Send button */}
         <button
           type="submit"
           disabled={disabled || !input.trim()}
