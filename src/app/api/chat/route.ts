@@ -501,7 +501,7 @@ Describe what you see accurately. Be specific about objects, people, text, color
   try {
     const client = createOpenAI({ baseURL: gemini.baseURL, apiKey: process.env.GEMINI_API_KEY });
     const result = await streamText({
-      model: client("gemini-2.5-flash"),
+      model: client(gemini.model),
       messages: [
         {
           role: "user",
