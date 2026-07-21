@@ -81,15 +81,14 @@ async function synthesizeResponses(responses: string[], userQuery: string, searc
     return responses.reduce((a, b) => (a.length > b.length ? a : b));
   }
 
-  const synthesisPrompt = `You are Noctryx AI. Multiple AI systems have analyzed the user's question. Your job is to synthesize their answers into ONE coherent, accurate, and helpful response.
+  const synthesisPrompt = `You are Noctryx AI. Multiple AI systems have analyzed the user's question. Synthesize their answers into ONE coherent, accurate response.
 
 RULES:
 - Do NOT mention that you used multiple AI models or providers.
 - Do NOT say "Model A said..." or "According to one source..."
-- Write as if YOU are the sole author of the answer.
-- Resolve any contradictions by picking the most accurate information.
-- Combine unique insights from all responses.
-- Be concise but thorough.
+- Write as if YOU are the sole author.
+- Resolve contradictions by picking the most accurate info.
+- Combine unique insights.
 
 ${searchCtx ? `SEARCH CONTEXT:\n${searchCtx}\n\n` : ""}
 USER QUESTION: ${userQuery}
@@ -117,6 +116,58 @@ Now write the final unified response:`;
     console.error("Synthesis failed:", e.message);
     return responses[0];
   }
+}
+
+async function speechToText(audioBase64: string): Promise<string> {
+  const groqKey = process.env.GROQ_API_KEY;
+  if (!groqKey) throw new Error("GROQ_API_KEY required for speech-to-text");
+
+  const audioBuffer = Buffer.from(audioBase64, "base64");
+
+  const formData = new FormData();
+  formData.append("file", new Blob([audioBuffer], { type: "audio/webm" }), "audio.webm");
+  formData.append("model", "whisper-large-v3");
+  formData.append("response_format", "json");
+
+  const res = await fetch("https://api.groq.com/openai/v1/audio/transcriptions", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${groqKey}` },
+    body: formData,
+  });
+
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(`STT failed: ${err}`);
+  }
+
+  const data = await res.json();
+  return data.text || "";
+}
+
+async function textToSpeech(text: string): Promise<string> {
+  if (!process.env.OPENAI_API_KEY) return "";
+
+  const res = await fetch("https://api.openai.com/v1/audio/speech", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: "tts-1",
+      voice: "alloy",
+      input: text.replace(/[*#_`]/g, "").substring(0, 1000),
+      response_format: "mp3",
+    }),
+  });
+
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(`TTS failed: ${err}`);
+  }
+
+  const audioBuffer = Buffer.from(await res.arrayBuffer());
+  return audioBuffer.toString("base64");
 }
 
 function truncate(str: string | null, max: number) {
@@ -445,7 +496,7 @@ async function analyzeImageWithGemini(base64Image: string, userQuestion: string)
 
 USER QUESTION: ${userQuestion}
 
-Describe what you see in the image accurately and answer the user's question. Be specific about objects, people, text, colors, and spatial relationships. If you cannot clearly see something, say so honestly.`;
+Describe what you see accurately. Be specific about objects, people, text, colors, and spatial relationships. If you cannot clearly see something, say so honestly.`;
 
   try {
     const client = createOpenAI({ baseURL: gemini.baseURL, apiKey: process.env.GEMINI_API_KEY });
@@ -480,9 +531,24 @@ export async function POST(req: Request) {
     const session = await getServerSession(authOptions);
     if (!session) return new Response(JSON.stringify({ error: "Unauthorized" }), { status: 401 });
 
-    const { messages, conversationId, autoVerify = false, imageBase64, mode } = await req.json();
-    const userPrompt = messages[messages.length - 1].content;
+    const body = await req.json();
+    const { messages, conversationId, autoVerify = false, imageBase64, mode, audioBase64, enableTTS = false } = body;
+
+    let userPrompt = messages[messages.length - 1].content;
     const lowerPrompt = userPrompt.toLowerCase();
+
+    let transcribedFromVoice = false;
+    if (mode === "voice" && audioBase64) {
+      try {
+        const transcript = await speechToText(audioBase64);
+        if (transcript) {
+          userPrompt = transcript;
+          transcribedFromVoice = true;
+        }
+      } catch (e: any) {
+        console.error("STT failed:", e.message);
+      }
+    }
 
     let convId = conversationId;
     if (!convId) {
@@ -750,6 +816,19 @@ Answer clearly in markdown. Only output action commands when EXPLICITLY asked:
           }
         } catch (e) {
           console.error("Verification error:", e);
+        }
+
+        let audioBase64 = "";
+        if ((mode === "voice" || enableTTS) && chatTxt) {
+          try {
+            sendStatus("🔊 Generating voice response...");
+            audioBase64 = await textToSpeech(chatTxt.replace(/[*#_`]/g, "").substring(0, 1000));
+            if (audioBase64) {
+              ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ audioBase64 })}\n\n`));
+            }
+          } catch (e: any) {
+            console.error("TTS failed:", e.message);
+          }
         }
 
         ctrl.enqueue(enc.encode("data: [DONE]\n\n"));
