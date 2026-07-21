@@ -169,61 +169,6 @@ export function ChatContainer() {
     }
   };
 
-  // ─── VOICE SEND ───
-  const handleSendVoice = async (audioBase64: string, enableTTS: boolean) => {
-    if (!session) return;
-
-    const newUserMessage: Message = { role: "user", content: "🎤 Voice message" };
-    setMessages((prev) => [...prev, newUserMessage, { role: "assistant", content: "", searchSteps: [] }]);
-    setIsStreaming(true);
-
-    try {
-      const response = await fetch("/api/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          messages: [...messages, newUserMessage],
-          conversationId,
-          mode: "voice",
-          audioBase64,
-          enableTTS,
-        }),
-      });
-
-      await handleStreamResponse(response);
-    } catch (error) {
-      console.error("Voice Chat Error:", error);
-      setIsStreaming(false);
-    }
-  };
-
-  // ─── NOCTRYX LIVE SEND ───
-  const handleSendLive = async (imageBase64: string, question: string) => {
-    if (!session) return;
-
-    const newUserMessage: Message = { role: "user", content: `📷 ${question}` };
-    setMessages((prev) => [...prev, newUserMessage, { role: "assistant", content: "", searchSteps: [] }]);
-    setIsStreaming(true);
-
-    try {
-      const response = await fetch("/api/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          messages: [...messages, newUserMessage],
-          conversationId,
-          mode: "live",
-          imageBase64,
-        }),
-      });
-
-      await handleStreamResponse(response);
-    } catch (error) {
-      console.error("Live Chat Error:", error);
-      setIsStreaming(false);
-    }
-  };
-
   // Auto-send prompt from URL
   useEffect(() => {
     if (typeof window !== "undefined" && status === "authenticated" && !hasInitialized) {
@@ -325,11 +270,8 @@ export function ChatContainer() {
           </div>
         </div>
         
-        {/* UPDATED: Pass new props for voice and live camera */}
         <ChatInput 
           onSend={handleSend} 
-          onSendVoice={handleSendVoice}
-          onSendLive={handleSendLive}
           disabled={isStreaming} 
         />
       </div>
