@@ -65,7 +65,6 @@ async function callAllAI(messages: any[], temp: number, maxTokens: number, timeo
     }
   });
 
-  // Wait for all with timeout
   const timeoutPromise = new Promise<never>((_, reject) => 
     setTimeout(() => reject(new Error("AI timeout")), timeoutMs)
   );
@@ -86,7 +85,6 @@ async function callAllAI(messages: any[], temp: number, maxTokens: number, timeo
       providers: valid.map((r) => r.provider),
     };
   } catch (e) {
-    // Timeout - return whatever we have
     const results = await Promise.all(promises.map(p => p.catch(() => null)));
     const valid = results.filter((r): r is { text: string; provider: string } => r !== null && r.text.length > 10);
     if (valid.length === 0) throw new Error("All providers unavailable in ensemble");
@@ -515,9 +513,14 @@ async function analyzeImageWithGemini(base64Image: string, userQuestion: string)
   }
 
   const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-  const model = genAI.getGenerativeModel({ 
-    model: process.env.GEMINI_MODEL_ID || "gemini-3.5-flash" 
-  });
+
+  // Try models in order: user-set → 3.5-flash → 2.0-flash → 1.5-flash
+  const modelNames = [
+    process.env.GEMINI_MODEL_ID,
+    "gemini-3.5-flash",
+    "gemini-2.0-flash",
+    "gemini-1.5-flash",
+  ].filter(Boolean) as string[];
 
   const visionPrompt = `You are Noctryx AI with live camera vision. The user has shared a photo from their camera and asked a question about what you see.
 
@@ -525,18 +528,34 @@ USER QUESTION: ${userQuestion}
 
 Describe what you see accurately. Be specific about objects, people, text, colors, and spatial relationships. If you cannot clearly see something, say so honestly.`;
 
-  try {
-    const result = await model.generateContent([
-      visionPrompt,
-      { inlineData: { data: base64Image, mimeType: "image/jpeg" } }
-    ]);
-    
-    const response = await result.response;
-    return response.text();
-  } catch (e: any) {
-    console.error("Vision analysis failed:", e.message);
-    throw e;
+  let lastError = "";
+
+  for (const modelName of modelNames) {
+    try {
+      console.log("Trying vision model:", modelName);
+      const model = genAI.getGenerativeModel({ model: modelName });
+      const result = await model.generateContent([
+        visionPrompt,
+        { inlineData: { data: base64Image, mimeType: "image/jpeg" } }
+      ]);
+      
+      const response = await result.response;
+      const text = response.text();
+      console.log("Vision success with:", modelName);
+      return text;
+    } catch (e: any) {
+      console.error("Vision model failed:", modelName, e.message);
+      lastError = e.message;
+      // If it's a 503/rate limit, try next model immediately
+      if (e.message?.includes("503") || e.message?.includes("high demand") || e.message?.includes("Service Unavailable")) {
+        continue;
+      }
+      // For other errors, also try next model
+      continue;
+    }
   }
+
+  throw new Error("All vision models failed. Last error: " + lastError);
 }
 
 export async function POST(req: Request) {
@@ -751,8 +770,8 @@ Answer clearly in markdown. Only output action commands when EXPLICITLY asked:
         let chatTxt = "";
 
         try {
-          // Start searches in background (non-blocking)
-          const searchPromise = Promise.allSettled([
+          // ALWAYS search for every query - but silently
+          const [tavily, wiki, ddg, hn, so, gh, arxiv] = await Promise.all([
             searchTavily(userPrompt),
             searchWiki(userPrompt),
             searchDdg(userPrompt),
@@ -762,10 +781,31 @@ Answer clearly in markdown. Only output action commands when EXPLICITLY asked:
             searchArxiv(userPrompt),
           ]);
 
+          let searchCtx = "";
+          if (tavily) searchCtx += `[Tavily] ${truncate(tavily, 400)}\n\n`;
+          if (wiki) searchCtx += `[Wikipedia] ${truncate(wiki, 200)}\n\n`;
+          if (ddg) searchCtx += `[DuckDuckGo] ${truncate(ddg, 200)}\n\n`;
+          if (hn) searchCtx += `[Hacker News] ${truncate(hn, 200)}\n\n`;
+          if (so) searchCtx += `[StackOverflow] ${truncate(so, 200)}\n\n`;
+          if (gh) searchCtx += `[GitHub] ${truncate(gh, 200)}\n\n`;
+          if (arxiv) searchCtx += `[arXiv] ${truncate(arxiv, 200)}\n\n`;
+
+          const hasSearchResults = searchCtx.length > 0;
+
+          // Only tell user we searched if we actually found something
+          if (hasSearchResults) {
+            sendStatus("🔎 Found live sources, enhancing answer...");
+          }
+
+          // Build system prompt - only include search if we got results
+          const systemWithSearch = hasSearchResults
+            ? `${SYSTEM}\n\n---\nLIVE SEARCH RESULTS FOR THIS QUERY (use these to answer accurately, cite sources):\n\n${searchCtx}`
+            : SYSTEM;
+
           // Call ALL AI providers in parallel (ensemble)
           sendStatus("🧠 Accessing AI brain...");
           const aiMessages = [
-            { role: "system", content: SYSTEM },
+            { role: "system", content: systemWithSearch },
             ...messages.slice(-6).map((m: any) => ({
               role: m.role === "assistant" ? "assistant" : "user",
               content: m.content.includes("data:image") ? "[Image]" : m.content,
@@ -776,20 +816,6 @@ Answer clearly in markdown. Only output action commands when EXPLICITLY asked:
 
           // Synthesize all responses into one
           sendStatus("🔄 Synthesizing best answer...");
-          
-          // Get search results if available
-          const searchResults = await searchPromise;
-          let searchCtx = "";
-          const [tavily, wiki, ddg, hn, so, gh, arxiv] = searchResults.map(r => r.status === 'fulfilled' ? r.value : null);
-          
-          if (tavily) searchCtx += `[Tavily] ${truncate(tavily, 400)}\n\n`;
-          if (wiki) searchCtx += `[Wikipedia] ${truncate(wiki, 200)}\n\n`;
-          if (ddg) searchCtx += `[DuckDuckGo] ${truncate(ddg, 200)}\n\n`;
-          if (hn) searchCtx += `[Hacker News] ${truncate(hn, 200)}\n\n`;
-          if (so) searchCtx += `[StackOverflow] ${truncate(so, 200)}\n\n`;
-          if (gh) searchCtx += `[GitHub] ${truncate(gh, 200)}\n\n`;
-          if (arxiv) searchCtx += `[arXiv] ${truncate(arxiv, 200)}\n\n`;
-
           const synthesized = await synthesizeResponses(aiResponses, userPrompt, searchCtx);
           chatTxt = synthesized;
 
