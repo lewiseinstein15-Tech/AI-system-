@@ -51,7 +51,6 @@ export function ChatContainer() {
     }
   }, [status, session]);
 
-  // ─── HANDLE SSE STREAM (shared by text, voice, and live) ───
   const handleStreamResponse = async (response: Response) => {
     if (!response.ok) {
       setMessages((prev) => {
@@ -87,31 +86,24 @@ export function ChatContainer() {
         try {
           const parsed = JSON.parse(data);
 
-          // Status updates (searching, consulting models, etc.)
           if (parsed.status) {
             setMessages((prev) => {
               const newMessages = [...prev];
               const lastMsg = newMessages[newMessages.length - 1];
-              if (lastMsg) {
-                lastMsg.content = `*${parsed.status}*`;
-              }
+              if (lastMsg) lastMsg.content = `*${parsed.status}*`;
               return [...newMessages];
             });
           }
 
-          // Search steps
           if (parsed.searchStep) {
             setMessages((prev) => {
               const newMessages = [...prev];
               const lastMsg = newMessages[newMessages.length - 1];
-              if (lastMsg) {
-                lastMsg.searchSteps = [...(lastMsg.searchSteps || []), parsed.searchStep];
-              }
+              if (lastMsg) lastMsg.searchSteps = [...(lastMsg.searchSteps || []), parsed.searchStep];
               return [...newMessages];
             });
           }
 
-          // Text streaming
           if (parsed.choices?.[0]?.delta?.content) {
             const token = parsed.choices[0].delta.content;
             assistantContent += token;
@@ -126,14 +118,13 @@ export function ChatContainer() {
             });
           }
 
-          // Audio response (TTS)
           if (parsed.audioBase64) {
             audioBase64 = parsed.audioBase64;
             const audio = new Audio(`data:audio/mp3;base64,${audioBase64}`);
             audio.play().catch((e) => console.error("Audio play failed:", e));
           }
         } catch (e) {
-          // Ignore JSON parse errors for incomplete chunks
+          // Ignore JSON parse errors
         }
       }
     }
@@ -141,7 +132,6 @@ export function ChatContainer() {
     setIsStreaming(false);
   };
 
-  // ─── NORMAL TEXT SEND ───
   const handleSend = async (message: string) => {
     if (!session) return;
 
@@ -159,17 +149,10 @@ export function ChatContainer() {
       await handleStreamResponse(response);
     } catch (error) {
       console.error("Chat Error:", error);
-      setMessages((prev) => {
-        const newMessages = [...prev];
-        const lastMsg = newMessages[newMessages.length - 1];
-        if (lastMsg) lastMsg.content = "Error: Unable to fetch response.";
-        return newMessages;
-      });
       setIsStreaming(false);
     }
   };
 
-  // Auto-send prompt from URL
   useEffect(() => {
     if (typeof window !== "undefined" && status === "authenticated" && !hasInitialized) {
       const params = new URLSearchParams(window.location.search);
