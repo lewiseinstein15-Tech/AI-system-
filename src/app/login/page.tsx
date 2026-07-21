@@ -38,7 +38,7 @@ export default function LoginPage() {
     <div className="flex min-h-screen items-center justify-center bg-background p-4">
       <div className="w-full max-w-md space-y-6 rounded-lg border border-border bg-accent/20 p-8 backdrop-blur-sm">
         <div className="space-y-2 text-center">
-          <h1 className="text-3xl font-bold text-primary">CS Hub AI</h1>
+          <h1 className="text-3xl font-bold text-primary">Noctryx AI</h1>
           <p className="text-foreground/60">Sign in to your account</p>
         </div>
         {error && <div className="rounded bg-red-500/10 p-3 text-sm text-red-500">{error}</div>}
