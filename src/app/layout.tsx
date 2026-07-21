@@ -7,13 +7,13 @@ const inter = Inter({ subsets: ["latin"], variable: "--font-inter" });
 const jetbrainsMono = JetBrains_Mono({ subsets: ["latin"], variable: "--font-jetbrains-mono" });
 
 export const metadata: Metadata = {
-  title: "Computer Science Hub AI",
-  description: "An elite AI-powered learning platform for CS students.",
+  title: "Noctryx AI",
+  description: "An elite AI-powered learning platform built by Lewis Einstein at Kibabii University.",
   manifest: "/manifest.webmanifest",
   appleWebApp: {
     capable: true,
     statusBarStyle: "black-translucent",
-    title: "CS Hub AI",
+    title: "Noctryx AI",
   },
 };
 
@@ -31,7 +31,6 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en" className="dark">
-      {/* Removed bg-background from body to let the CSS grid show through */}
       <body className={`${inter.variable} ${jetbrainsMono.variable} font-sans text-foreground antialiased`}>
         <Providers>{children}</Providers>
       </body>
