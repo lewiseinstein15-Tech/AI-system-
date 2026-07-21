@@ -319,14 +319,17 @@ export function ChatInput({ onSend, onSendVoice, onSendLive, disabled }: ChatInp
 
             {/* Noctryx Live (Camera) */}
             {!isLiveMode && onSendLive && (
-              <button
-                type="button"
-                onClick={startCamera}
-                title="Noctryx Live - Camera"
-                className="p-2 text-foreground/40 hover:text-primary transition-colors"
-              >
-                <Camera className="h-5 w-5" />
-              </button>
+              <div className="flex flex-col items-center">
+                <button
+                  type="button"
+                  onClick={startCamera}
+                  title="Noctryx Live - Camera"
+                  className="p-2 text-foreground/40 hover:text-primary transition-colors"
+                >
+                  <Camera className="h-5 w-5" />
+                </button>
+                <span className="text-[10px] text-primary font-mono -mt-1">Noctryx Live</span>
+              </div>
             )}
 
             {/* Backend Voice Recording (Whisper) - hold to record */}
