@@ -633,11 +633,12 @@ CRITICAL RULES:
 - Do NOT create flashcards, notes, or assignments
 - ONLY write analysis and code
 - Do NOT claim your code is "verified," "tested," or "correct" — the backend will independently verify it. Just write your best solution.
+- When handling Unicode strings, use Intl.Segmenter with granularity: "grapheme" for correct character boundaries. Array.from() and string[i] break emoji sequences (like 👨‍👩‍👧‍👦) and combining characters.
 
 Your response MUST have exactly 2 sections:
 
 **SECTION 1: ANALYSIS**
-Briefly analyze inputs/outputs/constraints, algorithm choice, time/space complexity.
+Briefly analyze inputs/outputs/constraints, algorithm choice, time/space complexity. Mention any Unicode or edge-case considerations.
 
 **SECTION 2: CODE**
 Write a complete JavaScript solution as a single named function, with one console.log test case at the bottom calling it with a concrete example input.
@@ -698,7 +699,7 @@ Be concise. No extra text after the code block.`;
               }
 
               if (execResult.ok) {
-                full = roundText + `\n\n✅ **Backend-verified** (via ${providerName}, independently re-executed, round ${round}/${MAX_ROUNDS}) — real output: \`${execResult.stdout || "(no output)"}\``;
+                full = roundText + `\n\n⚠️ **Code executed without errors** (via ${providerName}, round ${round}/${MAX_ROUNDS}) — output: \`${execResult.stdout || "(no output)"}\`. This verifies the code runs, NOT that it is mathematically correct. Always test independently.`;
                 finalVerified = true;
                 break;
               }
@@ -707,7 +708,7 @@ Be concise. No extra text after the code block.`;
               convoMessages.push({ role: "assistant", content: roundText });
               convoMessages.push({
                 role: "user",
-                content: `Your code failed when actually executed. This is the real error:\n\n${execResult.stderr}\n\nFix it. Follow the exact same format: start with **SECTION 1: ANALYSIS**, then **SECTION 2: CODE** with a JavaScript code block. Do not claim success until this stops erroring.`,
+                content: `Your code failed when actually executed. This is the real error:\n\n${execResult.stderr}\n\nFix it. Follow the exact same format: start with **SECTION 1: ANALYSIS**, then **SECTION 2: CODE** with a JavaScript code block. Also verify your solution handles edge cases: empty input, single character, Unicode grapheme clusters (emoji families, combining characters), and very long strings. Do not claim success until this stops erroring.`,
               });
 
               if (round === MAX_ROUNDS) {
@@ -752,7 +753,40 @@ Answer clearly in markdown. Only output action commands when EXPLICITLY asked:
 [ACTION:CREATE_ASSIGNMENT] Title: <text> | Due: <YYYY-MM-DDTHH:MM:SS>
 
 CRITICAL UNCERTAINTY RULE:
-If no live search results are available for the user's question, or if the search APIs return no relevant information, you MUST explicitly say "I'm not certain" or "I don't have enough information to answer this accurately" rather than fabricating an answer. Only state facts you can ground in the provided search context or your training data. Do not hallucinate.`;
+If no live search results are available for the user's question, or if the search APIs return no relevant information, you MUST explicitly say "I'm not certain" or "I don't have enough information to answer this accurately" rather than fabricating an answer. Only state facts you can ground in the provided search context or your training data. Do not hallucinate.
+
+MATHEMATICS FORMATTING RULE:
+When solving mathematics problems, you MUST follow this exact structure:
+
+**1. Restate the Problem**
+Rewrite the problem in clear, precise language.
+
+**2. Given Information**
+List all known values, conditions, constraints, and definitions.
+
+**3. What Must Be Found**
+State explicitly what the question asks you to determine.
+
+**4. Formula or Method**
+Identify and name the theorem, formula, identity, or technique you will apply.
+
+**5. Solution — Numbered Steps**
+Show the solution in numbered steps. Each step must be:
+- Concise
+- Mathematically justified
+- Sequential (do not skip steps or omit calculations)
+
+**6. Verification**
+When possible, verify the answer by substitution, inverse operation, estimation, or alternative method.
+
+**7. Final Answer**
+End with a clearly labeled "Final Answer:" on its own line.
+
+Additional constraints:
+- Do not omit important calculations.
+- Do not jump between non-sequential steps.
+- Use proper mathematical notation and formatting (LaTeX-style where appropriate).
+- Keep derivations clean and readable.`;
 
     const enc = new TextEncoder();
 
@@ -800,7 +834,7 @@ If no live search results are available for the user's question, or if the searc
           sendStatus("🧠 Accessing AI brain...");
           const aiMessages = [
             { role: "system", content: systemWithSearch },
-            ...messages.slice(-6).map((m: any) => ({
+n            ...messages.slice(-6).map((m: any) => ({
               role: m.role === "assistant" ? "assistant" : "user",
               content: m.content.includes("data:image") ? "[Image]" : m.content,
             })),
