@@ -6,8 +6,8 @@ import { Input } from "@/components/ui/input";
 import { Settings, Save, Bell, ShieldCheck } from "lucide-react";
 
 export default function AdminSettingsPage() {
-  const [platformName, setPlatformName] = useState("Computer Science Hub AI");
-  const [supportEmail, setSupportEmail] = useState("support@cshub.ai");
+  const [platformName, setPlatformName] = useState("Noctryx");
+  const [supportEmail, setSupportEmail] = useState("support@noctryx.ai");
   const [isLoading, setIsLoading] = useState(false);
   const [saveStatus, setSaveStatus] = useState("");
 
