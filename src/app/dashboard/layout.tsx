@@ -31,14 +31,14 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         <button onClick={() => setMenuOpen(!menuOpen)}>
           {menuOpen ? <X className="h-6 w-6 text-primary" /> : <Menu className="h-6 w-6 text-primary" />}
         </button>
-        <h1 className="text-lg font-bold text-primary font-mono">CS Hub</h1>
+        <h1 className="text-lg font-bold text-primary font-mono">Noctryx</h1>
         <div className="w-6"></div>
       </div>
 
       {/* Sidebar */}
       <aside className={`fixed md:relative z-20 w-64 border-r border-border bg-accent/20 flex flex-col transition-transform duration-300 ${menuOpen ? "translate-x-0" : "-translate-x-full md:translate-x-0"}`}>
         <div className="p-6 border-b border-border hidden md:block">
-          <h2 className="text-xl font-bold text-primary font-mono">CS Hub</h2>
+          <h2 className="text-xl font-bold text-primary font-mono">Noctryx</h2>
         </div>
         <nav className="flex-1 p-4 space-y-1 mt-12 md:mt-0">
           {navItems.map((item) => (
