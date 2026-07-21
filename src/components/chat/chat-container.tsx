@@ -254,7 +254,7 @@ export function ChatContainer() {
   if (status === "loading" || status === "unauthenticated") {
     return (
       <div className="flex h-screen items-center justify-center bg-background">
-        <div className="animate-pulse text-primary font-mono">Loading CS Hub AI...</div>
+        <div className="animate-pulse text-primary font-mono">Loading Noctryx AI...</div>
       </div>
     );
   }
@@ -274,7 +274,7 @@ export function ChatContainer() {
           <button onClick={() => setMobileSidebarOpen(!mobileSidebarOpen)}>
             {mobileSidebarOpen ? <X className="h-6 w-6 text-primary" /> : <Menu className="h-6 w-6 text-primary" />}
           </button>
-          <h1 className="text-lg font-bold text-primary font-mono">CS Hub AI</h1>
+          <h1 className="text-lg font-bold text-primary font-mono">Noctryx AI</h1>
           <div className="w-6"></div>
         </header>
         
@@ -285,7 +285,7 @@ export function ChatContainer() {
                 <div className="rounded-full bg-primary/10 p-4">
                   <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#39FF14" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/></svg>
                 </div>
-                <h2 className="text-2xl font-bold font-mono">Computer Science Hub AI</h2>
+                <h2 className="text-2xl font-bold font-mono">Noctryx AI</h2>
                 <p className="max-w-md text-primary/80 typing-cursor h-6 font-mono">{typedWelcome}</p>
               </div>
             ) : (
@@ -302,7 +302,7 @@ export function ChatContainer() {
                       </div>
                       <div className="flex-1 overflow-hidden">
                         <div className="mb-1 flex items-center gap-2">
-                          <span className="text-sm font-semibold font-mono">CS Hub AI</span>
+                          <span className="text-sm font-semibold font-mono">Noctryx AI</span>
                         </div>
                         <span className="text-sm font-mono text-foreground/50 animate-pulse">Thinking...</span>
                       </div>
