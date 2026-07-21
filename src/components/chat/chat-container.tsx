@@ -51,6 +51,97 @@ export function ChatContainer() {
     }
   }, [status, session]);
 
+  // ─── HANDLE SSE STREAM (shared by text, voice, and live) ───
+  const handleStreamResponse = async (response: Response) => {
+    if (!response.ok) {
+      setMessages((prev) => {
+        const newMessages = [...prev];
+        const lastMsg = newMessages[newMessages.length - 1];
+        if (lastMsg) lastMsg.content = "Error: Unable to fetch response.";
+        return newMessages;
+      });
+      setIsStreaming(false);
+      return;
+    }
+    if (!response.body) {
+      setIsStreaming(false);
+      return;
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let assistantContent = "";
+    let audioBase64 = "";
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      const chunk = decoder.decode(value);
+      const lines = chunk.split("\n").filter((line) => line.startsWith("data: "));
+
+      for (const line of lines) {
+        const data = line.replace("data: ", "");
+        if (data === "[DONE]") break;
+
+        try {
+          const parsed = JSON.parse(data);
+
+          // Status updates (searching, consulting models, etc.)
+          if (parsed.status) {
+            setMessages((prev) => {
+              const newMessages = [...prev];
+              const lastMsg = newMessages[newMessages.length - 1];
+              if (lastMsg) {
+                lastMsg.content = `*${parsed.status}*`;
+              }
+              return [...newMessages];
+            });
+          }
+
+          // Search steps
+          if (parsed.searchStep) {
+            setMessages((prev) => {
+              const newMessages = [...prev];
+              const lastMsg = newMessages[newMessages.length - 1];
+              if (lastMsg) {
+                lastMsg.searchSteps = [...(lastMsg.searchSteps || []), parsed.searchStep];
+              }
+              return [...newMessages];
+            });
+          }
+
+          // Text streaming
+          if (parsed.choices?.[0]?.delta?.content) {
+            const token = parsed.choices[0].delta.content;
+            assistantContent += token;
+            setMessages((prev) => {
+              const newMessages = [...prev];
+              const lastMsg = newMessages[newMessages.length - 1];
+              if (lastMsg) {
+                lastMsg.content = assistantContent;
+                lastMsg.searchSteps = [];
+              }
+              return [...newMessages];
+            });
+          }
+
+          // Audio response (TTS)
+          if (parsed.audioBase64) {
+            audioBase64 = parsed.audioBase64;
+            const audio = new Audio(`data:audio/mp3;base64,${audioBase64}`);
+            audio.play().catch((e) => console.error("Audio play failed:", e));
+          }
+        } catch (e) {
+          // Ignore JSON parse errors for incomplete chunks
+        }
+      }
+    }
+
+    setIsStreaming(false);
+  };
+
+  // ─── NORMAL TEXT SEND ───
   const handleSend = async (message: string) => {
     if (!session) return;
 
@@ -65,69 +156,75 @@ export function ChatContainer() {
         body: JSON.stringify({ messages: [...messages, newUserMessage], conversationId }),
       });
 
-      if (!response.ok) throw new Error("API Error");
-      if (!response.body) throw new Error("No response body");
-
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let assistantContent = "";
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        const chunk = decoder.decode(value);
-        const lines = chunk.split("\n").filter((line) => line.startsWith("data: "));
-
-        for (const line of lines) {
-          const data = line.replace("data: ", "");
-          if (data === "[DONE]") break;
-
-          try {
-            const parsed = JSON.parse(data);
-            
-            if (parsed.searchStep) {
-              setMessages((prev) => {
-                const newMessages = [...prev];
-                const lastMsg = newMessages[newMessages.length - 1];
-                if (lastMsg) {
-                  lastMsg.searchSteps = [...(lastMsg.searchSteps || []), parsed.searchStep];
-                }
-                return [...newMessages];
-              });
-            } else if (parsed.choices?.[0]?.delta?.content) {
-              const token = parsed.choices[0].delta.content;
-              assistantContent += token;
-              setMessages((prev) => {
-                const newMessages = [...prev];
-                const lastMsg = newMessages[newMessages.length - 1];
-                if (lastMsg) {
-                  lastMsg.content = assistantContent;
-                }
-                return [...newMessages];
-              });
-            }
-          } catch (e) {
-            // Ignore JSON parse errors for incomplete chunks
-          }
-        }
-      }
+      await handleStreamResponse(response);
     } catch (error) {
       console.error("Chat Error:", error);
       setMessages((prev) => {
         const newMessages = [...prev];
         const lastMsg = newMessages[newMessages.length - 1];
-        if (lastMsg) {
-          lastMsg.content = "Error: Unable to fetch response.";
-        }
+        if (lastMsg) lastMsg.content = "Error: Unable to fetch response.";
         return newMessages;
       });
-    } finally {
       setIsStreaming(false);
     }
   };
 
-  // Auto-send prompt from URL (for recommended topics)
+  // ─── VOICE SEND ───
+  const handleSendVoice = async (audioBase64: string, enableTTS: boolean) => {
+    if (!session) return;
+
+    const newUserMessage: Message = { role: "user", content: "🎤 Voice message" };
+    setMessages((prev) => [...prev, newUserMessage, { role: "assistant", content: "", searchSteps: [] }]);
+    setIsStreaming(true);
+
+    try {
+      const response = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          messages: [...messages, newUserMessage],
+          conversationId,
+          mode: "voice",
+          audioBase64,
+          enableTTS,
+        }),
+      });
+
+      await handleStreamResponse(response);
+    } catch (error) {
+      console.error("Voice Chat Error:", error);
+      setIsStreaming(false);
+    }
+  };
+
+  // ─── NOCTRYX LIVE SEND ───
+  const handleSendLive = async (imageBase64: string, question: string) => {
+    if (!session) return;
+
+    const newUserMessage: Message = { role: "user", content: `📷 ${question}` };
+    setMessages((prev) => [...prev, newUserMessage, { role: "assistant", content: "", searchSteps: [] }]);
+    setIsStreaming(true);
+
+    try {
+      const response = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          messages: [...messages, newUserMessage],
+          conversationId,
+          mode: "live",
+          imageBase64,
+        }),
+      });
+
+      await handleStreamResponse(response);
+    } catch (error) {
+      console.error("Live Chat Error:", error);
+      setIsStreaming(false);
+    }
+  };
+
+  // Auto-send prompt from URL
   useEffect(() => {
     if (typeof window !== "undefined" && status === "authenticated" && !hasInitialized) {
       const params = new URLSearchParams(window.location.search);
@@ -145,7 +242,6 @@ export function ChatContainer() {
     try {
       const res = await fetch(`/api/conversations/${id}`);
       const data = await res.json();
-      // CRASH FIX: Ensure data.messages is an array before mapping
       if (data && Array.isArray(data.messages)) {
         setMessages(data.messages.map((m: any) => ({ role: m.role, content: m.content })));
       }
@@ -228,7 +324,14 @@ export function ChatContainer() {
             <div ref={messagesEndRef} />
           </div>
         </div>
-        <ChatInput onSend={handleSend} disabled={isStreaming} />
+        
+        {/* UPDATED: Pass new props for voice and live camera */}
+        <ChatInput 
+          onSend={handleSend} 
+          onSendVoice={handleSendVoice}
+          onSendLive={handleSendLive}
+          disabled={isStreaming} 
+        />
       </div>
     </div>
   );
