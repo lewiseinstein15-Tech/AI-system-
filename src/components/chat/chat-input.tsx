@@ -298,7 +298,7 @@ export function ChatInput({ onSend, onSendVoice, onSendLive, disabled }: ChatInp
               ref={textareaRef}
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              placeholder={isListening ? "Listening..." : isRecording ? "Recording..." : "Ask anything about Computer Science..."}
+              placeholder={isListening ? "Listening..." : isRecording ? "Recording..." : "Ask anything..."}
               rows={1}
               className="flex-1 resize-none bg-transparent py-3 text-sm font-mono focus:outline-none max-h-40"
               disabled={disabled || isRecording}
