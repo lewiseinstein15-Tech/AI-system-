@@ -147,6 +147,30 @@ async function searchArxiv(q: string) {
   return null;
 }
 
+async function searchTavily(q: string) {
+  if (!process.env.TAVILY_API_KEY) return null;
+  try {
+    const r = await fetchTimeout("https://api.tavily.com/search", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        api_key: process.env.TAVILY_API_KEY,
+        query: q,
+        max_results: 3,
+        include_answer: true,
+      }),
+    }, 8000);
+    const d = await r.json();
+    let out = "";
+    if (d.answer) out += `Summary: ${d.answer}\n`;
+    if (d.results?.length) {
+      out += d.results.map((res: any) => `- ${res.title} (${res.url}): ${truncate(res.content, 200)}`).join("\n");
+    }
+    return out ? `Tavily Web Search: ${out}` : null;
+  } catch {}
+  return null;
+}
+
 interface Claim {
   text: string;
   type: "price" | "percentage" | "citation" | "statistic" | "attribution";
@@ -346,82 +370,6 @@ export async function POST(req: Request) {
       data: { conversationId: convId, role: "user", content: userPrompt },
     });
 
-    const isSearch =
-      lowerPrompt.startsWith("search for") ||
-      lowerPrompt.includes("search the web") ||
-      lowerPrompt.startsWith("look up") ||
-      lowerPrompt.startsWith("search ");
-
-    if (isSearch) {
-      const query = userPrompt.replace(/(search for|search the web for|look up|search)/i, "").trim().replace(/["']/g, "").trim();
-      const enc = new TextEncoder();
-
-      const stream = new ReadableStream({
-        async start(ctrl) {
-          const step = (s: string) => ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ searchStep: s })}\n\n`));
-          step("Wikipedia");
-          step("DuckDuckGo");
-          step("Hacker News");
-          step("StackOverflow");
-          step("GitHub");
-          step("arXiv");
-
-          const [wiki, ddg, hn, so, gh, arxiv] = await Promise.all([
-            searchWiki(query),
-            searchDdg(query),
-            searchHn(query),
-            searchSo(query),
-            searchGh(query),
-            searchArxiv(query),
-          ]);
-
-          let ctx = "";
-          if (wiki) ctx += `${truncate(wiki, 300)}\n\n`;
-          if (ddg) ctx += `${truncate(ddg, 300)}\n\n`;
-          if (hn) ctx += `${truncate(hn, 300)}\n\n`;
-          if (so) ctx += `${truncate(so, 300)}\n\n`;
-          if (gh) ctx += `${truncate(gh, 300)}\n\n`;
-          if (arxiv) ctx += `${truncate(arxiv, 300)}\n\n`;
-
-          let aiText = "";
-          if (ctx) {
-            try {
-              const { result } = await callAI(
-                [
-                  { role: "system", content: `You searched 6 sources for "${query}".\n\n${ctx}\n\nSummarize and cite sources.` },
-                  { role: "user", content: query },
-                ],
-                0.3,
-                1000
-              );
-              for await (const d of result.textStream) {
-                aiText += d;
-                ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: d } }] })}\n\n`));
-              }
-            } catch {
-              aiText = "*(All AI providers are currently unavailable or rate-limited. Please try again in a moment.)*";
-              ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: aiText } }] })}\n\n`));
-            }
-          } else {
-            aiText = `No results found for "${query}".`;
-            ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: aiText } }] })}\n\n`));
-          }
-
-          ctrl.enqueue(enc.encode("data: [DONE]\n\n"));
-          ctrl.close();
-
-          try {
-            await prisma.message.create({ data: { conversationId: convId, role: "assistant", content: aiText } });
-            await prisma.conversation.update({ where: { id: convId }, data: { updatedAt: new Date() } });
-          } catch (e) {
-            console.error("DB error:", e);
-          }
-        },
-      });
-
-      return new Response(stream, { headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" } });
-    }
-
     const isCoding =
       lowerPrompt.includes("code") ||
       lowerPrompt.includes("algorithm") ||
@@ -555,20 +503,47 @@ If asked your name, respond: "I am Noctryx AI."
 
 If asked who built you, respond: "I was built by Lewis Einstein, an AI/ML Engineer at Kibabii University, through countless researches and extensive training to assist you."
 
+If asked when you were built or came live, respond: "I was launched in July 2026 by Lewis Einstein."
+
 Answer clearly in markdown. Only output action commands when EXPLICITLY asked:
 [ACTION:CREATE_FLASHCARD] Front: <text> | Back: <text>
 [ACTION:SAVE_NOTE] Title: <text> | Content: <text>
 [ACTION:CREATE_ASSIGNMENT] Title: <text> | Due: <YYYY-MM-DDTHH:MM:SS>`;
 
+    const enc = new TextEncoder();
+
+    // Auto-search all sources for every query
+    const [tavily, wiki, ddg, hn, so, gh, arxiv] = await Promise.all([
+      searchTavily(userPrompt),
+      searchWiki(userPrompt),
+      searchDdg(userPrompt),
+      searchHn(userPrompt),
+      searchSo(userPrompt),
+      searchGh(userPrompt),
+      searchArxiv(userPrompt),
+    ]);
+
+    let searchCtx = "";
+    if (tavily) searchCtx += `[Tavily] ${truncate(tavily, 600)}\n\n`;
+    if (wiki) searchCtx += `[Wikipedia] ${truncate(wiki, 300)}\n\n`;
+    if (ddg) searchCtx += `[DuckDuckGo] ${truncate(ddg, 300)}\n\n`;
+    if (hn) searchCtx += `[Hacker News] ${truncate(hn, 300)}\n\n`;
+    if (so) searchCtx += `[StackOverflow] ${truncate(so, 300)}\n\n`;
+    if (gh) searchCtx += `[GitHub] ${truncate(gh, 300)}\n\n`;
+    if (arxiv) searchCtx += `[arXiv] ${truncate(arxiv, 300)}\n\n`;
+
+    const systemWithSearch = searchCtx
+      ? `${SYSTEM}\n\n---\nLive search results for this query (use if relevant, cite sources):\n\n${searchCtx}`
+      : SYSTEM;
+
     const chatMsgs = [
-      { role: "system", content: SYSTEM },
+      { role: "system", content: systemWithSearch },
       ...messages.slice(-6).map((m: any) => ({
         role: m.role === "assistant" ? "assistant" : "user",
         content: m.content.includes("data:image") ? "[Image]" : m.content,
       })),
     ];
 
-    const enc = new TextEncoder();
     let chatTxt = "";
 
     let chatResult;
