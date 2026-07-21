@@ -12,7 +12,7 @@ const PROVIDERS = [
   { name: "Gemini", baseURL: "https://generativelanguage.googleapis.com/v1beta/openai", key: "GEMINI_API_KEY", model: process.env.GEMINI_MODEL_ID || "gemini-2.5-flash" },
 ];
 
-async function callAI(messages: any[], temp: number, maxTokens: number) {
+async function callSingleAI(messages: any[], temp: number, maxTokens: number) {
   let lastErr: any = null;
   for (const p of PROVIDERS) {
     const apiKey = process.env[p.key];
@@ -35,6 +35,88 @@ async function callAI(messages: any[], temp: number, maxTokens: number) {
     }
   }
   throw new Error("All providers unavailable: " + (lastErr?.message || "unknown"));
+}
+
+async function callAllAI(messages: any[], temp: number, maxTokens: number): Promise<{ responses: string[]; providers: string[] }> {
+  const promises = PROVIDERS.map(async (p) => {
+    const apiKey = process.env[p.key];
+    if (!apiKey) return null;
+    try {
+      const client = createOpenAI({ baseURL: p.baseURL, apiKey });
+      const result = await streamText({
+        model: client(p.model),
+        messages,
+        temperature: temp,
+        maxTokens,
+        maxRetries: 1,
+      });
+      let text = "";
+      for await (const d of result.textStream) {
+        text += d;
+      }
+      console.log("Ensemble response from:", p.name);
+      return { text, provider: p.name };
+    } catch (err: any) {
+      console.error(p.name, "ensemble failed:", err?.message || err);
+      return null;
+    }
+  });
+
+  const results = await Promise.all(promises);
+  const valid = results.filter((r): r is { text: string; provider: string } => r !== null && r.text.length > 10);
+
+  if (valid.length === 0) {
+    throw new Error("All providers unavailable in ensemble");
+  }
+
+  return {
+    responses: valid.map((r) => r.text),
+    providers: valid.map((r) => r.provider),
+  };
+}
+
+async function synthesizeResponses(responses: string[], userQuery: string, searchCtx: string): Promise<string> {
+  const gemini = PROVIDERS.find((p) => p.name === "Gemini");
+  if (!gemini || !process.env.GEMINI_API_KEY) {
+    return responses.reduce((a, b) => (a.length > b.length ? a : b));
+  }
+
+  const synthesisPrompt = `You are Noctryx AI. Multiple AI systems have analyzed the user's question. Your job is to synthesize their answers into ONE coherent, accurate, and helpful response.
+
+RULES:
+- Do NOT mention that you used multiple AI models or providers.
+- Do NOT say "Model A said..." or "According to one source..."
+- Write as if YOU are the sole author of the answer.
+- Resolve any contradictions by picking the most accurate information.
+- Combine unique insights from all responses.
+- Be concise but thorough.
+
+${searchCtx ? `SEARCH CONTEXT:\n${searchCtx}\n\n` : ""}
+USER QUESTION: ${userQuery}
+
+RESPONSES TO SYNTHESIZE:
+${responses.map((r, i) => `--- RESPONSE ${i + 1} ---\n${r}`).join("\n\n")}
+
+Now write the final unified response:`;
+
+  try {
+    const client = createOpenAI({ baseURL: gemini.baseURL, apiKey: process.env.GEMINI_API_KEY! });
+    const result = await streamText({
+      model: client(gemini.model),
+      messages: [{ role: "user", content: synthesisPrompt }],
+      temperature: 0.3,
+      maxTokens: 2500,
+      maxRetries: 1,
+    });
+    let text = "";
+    for await (const d of result.textStream) {
+      text += d;
+    }
+    return text;
+  } catch (e: any) {
+    console.error("Synthesis failed:", e.message);
+    return responses[0];
+  }
 }
 
 function truncate(str: string | null, max: number) {
@@ -349,12 +431,56 @@ function buildVerificationFooter(results: VerificationResult[]): string {
   return footer;
 }
 
+async function analyzeImageWithGemini(base64Image: string, userQuestion: string): Promise<string> {
+  const gemini = PROVIDERS.find((p) => p.name === "Gemini");
+  if (!gemini || !process.env.GEMINI_API_KEY) {
+    throw new Error("Gemini API key required for vision analysis");
+  }
+
+  const imageUrl = base64Image.startsWith("data:")
+    ? base64Image
+    : `data:image/jpeg;base64,${base64Image}`;
+
+  const visionPrompt = `You are Noctryx AI with live camera vision. The user has shared a photo from their camera and asked a question about what you see.
+
+USER QUESTION: ${userQuestion}
+
+Describe what you see in the image accurately and answer the user's question. Be specific about objects, people, text, colors, and spatial relationships. If you cannot clearly see something, say so honestly.`;
+
+  try {
+    const client = createOpenAI({ baseURL: gemini.baseURL, apiKey: process.env.GEMINI_API_KEY });
+    const result = await streamText({
+      model: client("gemini-2.5-flash"),
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: visionPrompt },
+            { type: "image", image: imageUrl },
+          ],
+        },
+      ],
+      temperature: 0.4,
+      maxTokens: 1500,
+      maxRetries: 1,
+    });
+    let text = "";
+    for await (const d of result.textStream) {
+      text += d;
+    }
+    return text;
+  } catch (e: any) {
+    console.error("Vision analysis failed:", e.message);
+    throw e;
+  }
+}
+
 export async function POST(req: Request) {
   try {
     const session = await getServerSession(authOptions);
     if (!session) return new Response(JSON.stringify({ error: "Unauthorized" }), { status: 401 });
 
-    const { messages, conversationId, autoVerify = false } = await req.json();
+    const { messages, conversationId, autoVerify = false, imageBase64, mode } = await req.json();
     const userPrompt = messages[messages.length - 1].content;
     const lowerPrompt = userPrompt.toLowerCase();
 
@@ -369,6 +495,32 @@ export async function POST(req: Request) {
     await prisma.message.create({
       data: { conversationId: convId, role: "user", content: userPrompt },
     });
+
+    if (mode === "live" && imageBase64) {
+      const enc = new TextEncoder();
+      const stream = new ReadableStream({
+        async start(ctrl) {
+          let analysis = "";
+          try {
+            ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ status: "📷 Analyzing what I see..." })}\n\n`));
+            analysis = await analyzeImageWithGemini(imageBase64, userPrompt);
+            ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: analysis } }] })}\n\n`));
+          } catch (e: any) {
+            analysis = "*(Vision analysis failed: " + e.message + ")*";
+            ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: analysis } }] })}\n\n`));
+          }
+          ctrl.enqueue(enc.encode("data: [DONE]\n\n"));
+          ctrl.close();
+          try {
+            await prisma.message.create({ data: { conversationId: convId, role: "assistant", content: analysis } });
+            await prisma.conversation.update({ where: { id: convId }, data: { updatedAt: new Date() } });
+          } catch (e) {
+            console.error("DB error:", e);
+          }
+        },
+      });
+      return new Response(stream, { headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" } });
+    }
 
     const isCoding =
       lowerPrompt.includes("code") ||
@@ -429,7 +581,7 @@ Be concise. No extra text after the code block.`;
             for (round = 1; round <= MAX_ROUNDS; round++) {
               sendStatus(round === 1 ? "🧠 Thinking... writing a solution" : `🔁 Round ${round}/${MAX_ROUNDS}: fixing the real error found and retrying`);
 
-              const { result, providerName } = await callAI(
+              const { result, providerName } = await callSingleAI(
                 [{ role: "system", content: CODING_PROMPT }, ...convoMessages],
                 0.2,
                 1500
@@ -512,95 +664,92 @@ Answer clearly in markdown. Only output action commands when EXPLICITLY asked:
 
     const enc = new TextEncoder();
 
-    // Auto-search all sources for every query
-    const [tavily, wiki, ddg, hn, so, gh, arxiv] = await Promise.all([
-      searchTavily(userPrompt),
-      searchWiki(userPrompt),
-      searchDdg(userPrompt),
-      searchHn(userPrompt),
-      searchSo(userPrompt),
-      searchGh(userPrompt),
-      searchArxiv(userPrompt),
-    ]);
-
-    let searchCtx = "";
-    if (tavily) searchCtx += `[Tavily] ${truncate(tavily, 600)}\n\n`;
-    if (wiki) searchCtx += `[Wikipedia] ${truncate(wiki, 300)}\n\n`;
-    if (ddg) searchCtx += `[DuckDuckGo] ${truncate(ddg, 300)}\n\n`;
-    if (hn) searchCtx += `[Hacker News] ${truncate(hn, 300)}\n\n`;
-    if (so) searchCtx += `[StackOverflow] ${truncate(so, 300)}\n\n`;
-    if (gh) searchCtx += `[GitHub] ${truncate(gh, 300)}\n\n`;
-    if (arxiv) searchCtx += `[arXiv] ${truncate(arxiv, 300)}\n\n`;
-
-    const systemWithSearch = searchCtx
-      ? `${SYSTEM}\n\n---\nLive search results for this query (use if relevant, cite sources):\n\n${searchCtx}`
-      : SYSTEM;
-
-    const chatMsgs = [
-      { role: "system", content: systemWithSearch },
-      ...messages.slice(-6).map((m: any) => ({
-        role: m.role === "assistant" ? "assistant" : "user",
-        content: m.content.includes("data:image") ? "[Image]" : m.content,
-      })),
-    ];
-
-    let chatTxt = "";
-
-    let chatResult;
-    try {
-      const { result } = await callAI(chatMsgs, 0.5, 2000);
-      chatResult = result;
-    } catch (e: any) {
-      return new Response(
-        new ReadableStream({
-          start(c) {
-            const m = "*(All AI providers are currently unavailable or rate-limited. Please try again in a moment.)*";
-            c.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: m } }] })}\n\n`));
-            c.enqueue(enc.encode("data: [DONE]\n\n"));
-            c.close();
-          },
-        }),
-        { headers: { "Content-Type": "text/event-stream" } }
-      );
-    }
-
     const stream = new ReadableStream({
       async start(ctrl) {
+        const sendStatus = (msg: string) =>
+          ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ status: msg })}\n\n`));
+
+        let chatTxt = "";
+
         try {
-          for await (const d of chatResult.textStream) {
-            chatTxt += d;
-            ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: d } }] })}\n\n`));
-          }
-        } catch (streamErr: any) {
-          const m = "\n\n*(The response was interrupted. Please try again.)*";
-          if (!chatTxt.includes(m)) {
-            ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: m } }] })}\n\n`));
-            chatTxt += m;
-          }
-        }
+          sendStatus("🔎 Searching live sources...");
+          const [tavily, wiki, ddg, hn, so, gh, arxiv] = await Promise.all([
+            searchTavily(userPrompt),
+            searchWiki(userPrompt),
+            searchDdg(userPrompt),
+            searchHn(userPrompt),
+            searchSo(userPrompt),
+            searchGh(userPrompt),
+            searchArxiv(userPrompt),
+          ]);
 
-        const claims = extractClaims(chatTxt);
-        let verificationFooter = "";
+          let searchCtx = "";
+          if (tavily) searchCtx += `[Tavily] ${truncate(tavily, 600)}\n\n`;
+          if (wiki) searchCtx += `[Wikipedia] ${truncate(wiki, 300)}\n\n`;
+          if (ddg) searchCtx += `[DuckDuckGo] ${truncate(ddg, 300)}\n\n`;
+          if (hn) searchCtx += `[Hacker News] ${truncate(hn, 300)}\n\n`;
+          if (so) searchCtx += `[StackOverflow] ${truncate(so, 300)}\n\n`;
+          if (gh) searchCtx += `[GitHub] ${truncate(gh, 300)}\n\n`;
+          if (arxiv) searchCtx += `[arXiv] ${truncate(arxiv, 300)}\n\n`;
 
-        const hasHighStakesClaims = claims.some(c =>
-          c.type === "price" ||
-          c.type === "citation" ||
-          (c.type === "percentage" && /approval|probability|chance|rate/i.test(c.text))
-        );
+          const systemWithSearch = searchCtx
+            ? `${SYSTEM}\n\n---\nLive search results for this query (use if relevant, cite sources):\n\n${searchCtx}`
+            : SYSTEM;
 
-        if (autoVerify || hasHighStakesClaims) {
-          ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ status: "🔎 Checking claims against live sources..." })}\n\n`));
-
-          const results = await Promise.all(
-            claims.slice(0, 5).map(c => verifyClaim(c))
+          sendStatus("🧠 Consulting multiple AI models...");
+          const { responses: aiResponses } = await callAllAI(
+            [
+              { role: "system", content: systemWithSearch },
+              ...messages.slice(-6).map((m: any) => ({
+                role: m.role === "assistant" ? "assistant" : "user",
+                content: m.content.includes("data:image") ? "[Image]" : m.content,
+              })),
+            ],
+            0.5,
+            2000
           );
 
-          verificationFooter = buildVerificationFooter(results);
+          sendStatus("🔄 Synthesizing best answer...");
+          const synthesized = await synthesizeResponses(aiResponses, userPrompt, searchCtx);
+          chatTxt = synthesized;
 
-          if (verificationFooter) {
-            ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: verificationFooter } }] })}\n\n`));
-            chatTxt += verificationFooter;
+          const words = synthesized.split(" ");
+          for (const word of words) {
+            ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: word + " " } }] })}\n\n`));
           }
+        } catch (e: any) {
+          console.error("Ensemble error:", e);
+          const fallback = "*(All AI providers are currently unavailable or rate-limited. Please try again in a moment.)*";
+          chatTxt = fallback;
+          ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: fallback } }] })}\n\n`));
+        }
+
+        try {
+          const claims = extractClaims(chatTxt);
+          let verificationFooter = "";
+
+          const hasHighStakesClaims = claims.some(c =>
+            c.type === "price" ||
+            c.type === "citation" ||
+            (c.type === "percentage" && /approval|probability|chance|rate/i.test(c.text))
+          );
+
+          if (autoVerify || hasHighStakesClaims) {
+            sendStatus("🔎 Checking claims against live sources...");
+
+            const results = await Promise.all(
+              claims.slice(0, 5).map(c => verifyClaim(c))
+            );
+
+            verificationFooter = buildVerificationFooter(results);
+
+            if (verificationFooter) {
+              ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: verificationFooter } }] })}\n\n`));
+              chatTxt += verificationFooter;
+            }
+          }
+        } catch (e) {
+          console.error("Verification error:", e);
         }
 
         ctrl.enqueue(enc.encode("data: [DONE]\n\n"));
