@@ -39,20 +39,29 @@ async function callSingleAI(messages: any[], temp: number, maxTokens: number) {
   throw new Error("All providers unavailable: " + (lastErr?.message || "unknown"));
 }
 
-// Call ALL providers in parallel, return all successful responses
+// Call ALL providers in parallel with proper per-provider timeout
 async function callAllAI(messages: any[], temp: number, maxTokens: number, timeoutMs = 12000): Promise<{ responses: string[]; providers: string[] }> {
-  const promises = PROVIDERS.map(async (p) => {
+  const providerPromises = PROVIDERS.map(async (p) => {
     const apiKey = process.env[p.key];
     if (!apiKey) return null;
+
+    const providerTimeout = new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error("Provider timeout")), timeoutMs)
+    );
+
     try {
       const client = createOpenAI({ baseURL: p.baseURL, apiKey });
-      const result = await streamText({
-        model: client(p.model),
-        messages,
-        temperature: temp,
-        maxTokens,
-        maxRetries: 0,
-      });
+      const result = await Promise.race([
+        streamText({
+          model: client(p.model),
+          messages,
+          temperature: temp,
+          maxTokens,
+          maxRetries: 0,
+        }),
+        providerTimeout,
+      ]);
+
       let text = "";
       for await (const d of result.textStream) {
         text += d;
@@ -65,34 +74,17 @@ async function callAllAI(messages: any[], temp: number, maxTokens: number, timeo
     }
   });
 
-  const timeoutPromise = new Promise<never>((_, reject) => 
-    setTimeout(() => reject(new Error("AI timeout")), timeoutMs)
-  );
-  
-  try {
-    const results = await Promise.race([
-      Promise.all(promises),
-      timeoutPromise
-    ]);
-    const valid = results.filter((r): r is { text: string; provider: string } => r !== null && r.text.length > 10);
-    
-    if (valid.length === 0) {
-      throw new Error("All providers unavailable in ensemble");
-    }
+  const results = await Promise.all(providerPromises);
+  const valid = results.filter((r): r is { text: string; provider: string } => r !== null && r.text.length > 10);
 
-    return {
-      responses: valid.map((r) => r.text),
-      providers: valid.map((r) => r.provider),
-    };
-  } catch (e) {
-    const results = await Promise.all(promises.map(p => p.catch(() => null)));
-    const valid = results.filter((r): r is { text: string; provider: string } => r !== null && r.text.length > 10);
-    if (valid.length === 0) throw new Error("All providers unavailable in ensemble");
-    return {
-      responses: valid.map((r) => r.text),
-      providers: valid.map((r) => r.provider),
-    };
+  if (valid.length === 0) {
+    throw new Error("All providers unavailable in ensemble");
   }
+
+  return {
+    responses: valid.map((r) => r.text),
+    providers: valid.map((r) => r.provider),
+  };
 }
 
 // Synthesize multiple responses into one
@@ -100,7 +92,7 @@ async function synthesizeResponses(responses: string[], userQuery: string, searc
   if (responses.length === 1) {
     return responses[0];
   }
-  
+
   const gemini = PROVIDERS.find((p) => p.name === "Gemini");
   if (!gemini || !process.env.GEMINI_API_KEY) {
     return responses.reduce((a, b) => (a.length > b.length ? a : b));
@@ -115,8 +107,7 @@ RULES:
 - Resolve contradictions by picking the most accurate info.
 - Combine unique insights.
 
-${searchCtx ? `SEARCH CONTEXT:\n${searchCtx}\n\n` : ""}
-USER QUESTION: ${userQuery}
+${searchCtx ? `SEARCH CONTEXT:\n${searchCtx}\n\n` : ""}USER QUESTION: ${userQuery}
 
 RESPONSES TO SYNTHESIZE:
 ${responses.map((r, i) => `--- RESPONSE ${i + 1} ---\n${r}`).join("\n\n")}
@@ -514,12 +505,14 @@ async function analyzeImageWithGemini(base64Image: string, userQuestion: string)
 
   const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
-  // Try models in order: user-set → 3.5-flash → 2.0-flash → 1.5-flash
+  // Updated fallback chain: user-set → 3.5-flash → 3.1-flash-lite → 2.5-flash
+  // Note: gemini-2.0-flash and gemini-1.5-flash were shut down June 1, 2026
+  // Note: gemini-2.5-flash is scheduled for shutdown October 16, 2026
   const modelNames = [
     process.env.GEMINI_MODEL_ID,
     "gemini-3.5-flash",
-    "gemini-2.0-flash",
-    "gemini-1.5-flash",
+    "gemini-3.1-flash-lite",
+    "gemini-2.5-flash",
   ].filter(Boolean) as string[];
 
   const visionPrompt = `You are Noctryx AI with live camera vision. The user has shared a photo from their camera and asked a question about what you see.
@@ -538,7 +531,7 @@ Describe what you see accurately. Be specific about objects, people, text, color
         visionPrompt,
         { inlineData: { data: base64Image, mimeType: "image/jpeg" } }
       ]);
-      
+
       const response = await result.response;
       const text = response.text();
       console.log("Vision success with:", modelName);
@@ -546,11 +539,9 @@ Describe what you see accurately. Be specific about objects, people, text, color
     } catch (e: any) {
       console.error("Vision model failed:", modelName, e.message);
       lastError = e.message;
-      // If it's a 503/rate limit, try next model immediately
       if (e.message?.includes("503") || e.message?.includes("high demand") || e.message?.includes("Service Unavailable")) {
         continue;
       }
-      // For other errors, also try next model
       continue;
     }
   }
@@ -716,7 +707,7 @@ Be concise. No extra text after the code block.`;
               convoMessages.push({ role: "assistant", content: roundText });
               convoMessages.push({
                 role: "user",
-                content: `Your code failed when actually executed. This is the real error:\n\n${execResult.stderr}\n\nFix it. Do not claim success until this stops erroring.`,
+                content: `Your code failed when actually executed. This is the real error:\n\n${execResult.stderr}\n\nFix it. Follow the exact same format: start with **SECTION 1: ANALYSIS**, then **SECTION 2: CODE** with a JavaScript code block. Do not claim success until this stops erroring.`,
               });
 
               if (round === MAX_ROUNDS) {
@@ -758,7 +749,10 @@ If asked when you were built or came live, respond: "I was launched in July 2026
 Answer clearly in markdown. Only output action commands when EXPLICITLY asked:
 [ACTION:CREATE_FLASHCARD] Front: <text> | Back: <text>
 [ACTION:SAVE_NOTE] Title: <text> | Content: <text>
-[ACTION:CREATE_ASSIGNMENT] Title: <text> | Due: <YYYY-MM-DDTHH:MM:SS>`;
+[ACTION:CREATE_ASSIGNMENT] Title: <text> | Due: <YYYY-MM-DDTHH:MM:SS>
+
+CRITICAL UNCERTAINTY RULE:
+If no live search results are available for the user's question, or if the search APIs return no relevant information, you MUST explicitly say "I'm not certain" or "I don't have enough information to answer this accurately" rather than fabricating an answer. Only state facts you can ground in the provided search context or your training data. Do not hallucinate.`;
 
     const enc = new TextEncoder();
 
