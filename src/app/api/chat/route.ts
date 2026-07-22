@@ -41,36 +41,43 @@ async function callSingleAI(messages: any[], temp: number, maxTokens: number) {
   throw new Error("All providers unavailable: " + (lastErr?.message || "unknown"));
 }
 
-// FIX 1: Increased timeout to 25s to prevent premature crashes on slower/free models
-async function callAllAI(messages: any[], temp: number, maxTokens: number, timeoutMs = 25000): Promise<{ responses: string[]; providers: string[] }> {
+async function callAllAI(messages: any[], temp: number, maxTokens: number, timeoutMs = 30000): Promise<{ responses: string[]; providers: string[] }> {
   const providerPromises = PROVIDERS.map(async (p) => {
     const apiKey = process.env[p.key];
-    if (!apiKey) return null;
+    if (!apiKey) {
+      console.log(`Skipping ${p.name}: No API key`);
+      return null;
+    }
 
     const operation = (async () => {
-      const client = createOpenAI({ baseURL: p.baseURL, apiKey });
-      const result = await streamText({
-        model: client(p.model),
-        messages,
-        temperature: temp,
-        maxTokens,
-        maxRetries: 0,
-      });
+      try {
+        const client = createOpenAI({ baseURL: p.baseURL, apiKey });
+        const result = await streamText({
+          model: client(p.model),
+          messages,
+          temperature: temp,
+          maxTokens,
+          maxRetries: 0,
+        });
 
-      let text = "";
-      for await (const d of result.textStream) {
-        text += d;
+        let text = "";
+        for await (const d of result.textStream) {
+          text += d;
+        }
+        console.log(`${p.name} completed successfully, length: ${text.length}`);
+        return { text, provider: p.name };
+      } catch (streamErr: any) {
+        console.error(`${p.name} stream error:`, streamErr?.message || streamErr);
+        throw streamErr;
       }
-      return { text, provider: p.name };
     })();
 
     const providerTimeout = new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error("Provider timeout")), timeoutMs)
+      setTimeout(() => reject(new Error(`${p.name} timeout after ${timeoutMs}ms`)), timeoutMs)
     );
 
     try {
       const resolved = await Promise.race([operation, providerTimeout]);
-      console.log("Ensemble response from:", p.name);
       return resolved;
     } catch (err: any) {
       console.error(p.name, "ensemble failed:", err?.message || err);
@@ -80,6 +87,8 @@ async function callAllAI(messages: any[], temp: number, maxTokens: number, timeo
 
   const results = await Promise.all(providerPromises);
   const valid = results.filter((r): r is { text: string; provider: string } => r !== null && r.text.length > 10);
+
+  console.log(`Valid responses: ${valid.length} out of ${PROVIDERS.length}`);
 
   if (valid.length === 0) {
     throw new Error("All providers unavailable in ensemble");
@@ -92,14 +101,21 @@ async function callAllAI(messages: any[], temp: number, maxTokens: number, timeo
 }
 
 async function synthesizeResponses(responses: string[], userQuery: string, searchCtx: string): Promise<string> {
-  if (responses.length === 1) return responses[0];
+  if (responses.length === 0) {
+    throw new Error("No responses to synthesize");
+  }
+  
+  if (responses.length === 1) {
+    console.log("Only 1 response, returning directly");
+    return responses[0];
+  }
 
   const gemini = PROVIDERS.find((p) => p.name === "Gemini");
   if (!gemini || !process.env.GEMINI_API_KEY) {
+    console.log("No Gemini for synthesis, returning longest response");
     return responses.reduce((a, b) => (a.length > b.length ? a : b));
   }
 
-  // FIX 2: Strict formatting prompt for synthesis
   const synthesisPrompt = `You are Noctryx AI. Synthesize these AI responses into ONE highly organized, accurate response.
 
 UNIVERSAL FORMATTING RULES (MUST FOLLOW):
@@ -117,6 +133,7 @@ ${responses.map((r, i) => `--- RESPONSE ${i + 1} ---\n${r}`).join("\n\n")}
 Now write the final unified, perfectly formatted response:`;
 
   try {
+    console.log("Starting synthesis with Gemini...");
     const client = createOpenAI({ baseURL: gemini.baseURL, apiKey: process.env.GEMINI_API_KEY! });
     const result = await streamText({
       model: client(gemini.model),
@@ -129,10 +146,11 @@ Now write the final unified, perfectly formatted response:`;
     for await (const d of result.textStream) {
       text += d;
     }
+    console.log("Synthesis completed, length:", text.length);
     return text;
   } catch (e: any) {
     console.error("Synthesis failed:", e.message);
-    // Fallback to the longest response instead of crashing
+    console.log("Falling back to longest response");
     return responses.reduce((a, b) => (a.length > b.length ? a : b));
   }
 }
@@ -213,7 +231,6 @@ function extractCode(text: string): string | null {
   return g ? g[1].trim() : null;
 }
 
-// --- SEARCH FUNCTIONS (Unchanged, they are robust) ---
 async function searchWiki(q: string) { try { const s = await fetchTimeout(`https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(q)}&format=json&origin=*`); const d = await s.json(); if (d.query?.search?.[0]) { const sum = await fetchTimeout(`https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(d.query.search[0].title)}`); const sd = await sum.json(); if (sd.extract) return `Wikipedia: ${sd.extract}`; } } catch {} return null; }
 async function searchDdg(q: string) { try { const r = await fetchTimeout(`https://api.duckduckgo.com/?q=${encodeURIComponent(q)}&format=json&no_html=1&skip_disambig=1`, { headers: { Accept: "application/json", "User-Agent": "NoctryxBot/1.0" } }); const d = await r.json(); if (d.AbstractText) return `DuckDuckGo: ${d.AbstractText}`; if (d.RelatedTopics?.[0]?.Text) return `DuckDuckGo: ${d.RelatedTopics[0].Text}`; } catch {} return null; }
 async function searchHn(q: string) { try { const r = await fetchTimeout(`https://hn.algolia.com/api/v1/search?query=${encodeURIComponent(q)}&tags=story&hitsPerPage=2`); const d = await r.json(); if (d.hits?.length) return `Hacker News: ${d.hits.map((h: any) => h.title).join(" | ")}`; } catch {} return null; }
@@ -233,7 +250,6 @@ async function searchTavily(q: string) {
   return null;
 }
 
-// --- CLAIM VERIFICATION (Unchanged) ---
 interface Claim { text: string; type: "price" | "percentage" | "citation" | "statistic" | "attribution"; }
 function stripMarkdown(text: string): string { return text.replace(/\|/g, " ").replace(/[*#_`]/g, "").replace(/\n/g, " ").replace(/\s+/g, " ").trim(); }
 function extractClaims(text: string): Claim[] {
@@ -430,8 +446,6 @@ Your response MUST have exactly 2 sections:
       return new Response(stream, { headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no" } });
     }
 
-    // --- STANDARD CHAT MODE ---
-    // FIX 3: Upgraded System Prompt for Universal Beautiful Formatting
     const SYSTEM = `You are Noctryx AI, built by Lewis Einstein, an AI/ML Engineer at Kibabii University, launched in July 2026.
 
 UNIVERSAL FORMATTING RULE (MUST FOLLOW FOR ALL RESPONSES):
@@ -452,7 +466,6 @@ If no live search results are available, you MUST explicitly say "I'm not certai
 
         try {
           sendStatus("🔎 Searching live sources...");
-          // FIX 4: Wrapped in try/catch so if ONE search API fails, it doesn't crash the whole request
           let tavily = null, wiki = null, ddg = null, hn = null, so = null, gh = null, arxiv = null;
           try {
             [tavily, wiki, ddg, hn, so, gh, arxiv] = await Promise.all([
@@ -477,6 +490,7 @@ If no live search results are available, you MUST explicitly say "I'm not certai
           sendStatus("🧠 Accessing AI brain...");
           const aiMessages = [{ role: "system", content: systemWithSearch }, ...messages.slice(-6).map((m: any) => ({ role: m.role === "assistant" ? "assistant" : "user", content: m.content.includes("data:image") ? "[Image]" : m.content }))];
 
+          sendStatus("🔄 Querying multiple AI models...");
           const { responses: aiResponses } = await callAllAI(aiMessages, 0.5, 2000);
 
           sendStatus("🔄 Synthesizing best answer...");
@@ -489,7 +503,7 @@ If no live search results are available, you MUST explicitly say "I'm not certai
           }
         } catch (e: any) {
           console.error("Chat error:", e);
-          chatTxt = "*(AI response unavailable. Please try again.)*";
+          chatTxt = `*(AI response unavailable. Error: ${e.message}. Please try again.)*`;
           const fallbackPayload = { choices: [{ delta: { content: chatTxt } }] };
           ctrl.enqueue(enc.encode(`data: ${JSON.stringify(fallbackPayload)}\n\n`));
         }
