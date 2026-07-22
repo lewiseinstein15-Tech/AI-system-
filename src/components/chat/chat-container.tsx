@@ -11,7 +11,6 @@ import { Menu, X, Bot } from "lucide-react";
 interface Message {
   role: "user" | "assistant" | "system";
   content: string;
-  searchSteps?: string[];
 }
 
 export function ChatContainer() {
@@ -19,6 +18,7 @@ export function ChatContainer() {
   const { data: session, status } = useSession();
   const [messages, setMessages] = useState<Message[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
+  const [currentStatus, setCurrentStatus] = useState<string>(""); // Dedicated state for live status
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -31,13 +31,13 @@ export function ChatContainer() {
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
+  }, [messages, currentStatus]); // Scroll when status updates too
 
   useEffect(() => {
     if (status === "authenticated" && session?.user) {
-      const role = session.user.role === "ADMIN" ? "Admin" : "";
+      const role = session.user.role === "ADMIN" ? "Admin " : "";
       const name = session.user.name || "User";
-      const fullText = `Welcome back, ${role} ${name}...`;
+      const fullText = `Welcome back, ${role}${name}...`;
       let index = 0;
       const timer = setInterval(() => {
         if (index < fullText.length) {
@@ -60,96 +60,100 @@ export function ChatContainer() {
         return newMessages;
       });
       setIsStreaming(false);
+      setCurrentStatus("");
       return;
     }
     if (!response.body) {
       setIsStreaming(false);
+      setCurrentStatus("");
       return;
     }
 
     const reader = response.body.getReader();
+    // FIX: Added { stream: true } to prevent UTF-8/Emoji character corruption on chunk boundaries
     const decoder = new TextDecoder();
     let assistantContent = "";
-    let audioBase64 = "";
 
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
 
-      const chunk = decoder.decode(value);
-      const lines = chunk.split("\n").filter((line) => line.startsWith("data: "));
+      const chunk = decoder.decode(value, { stream: true });
+      const lines = chunk.split("\n");
 
       for (const line of lines) {
-        const data = line.replace("data: ", "");
-        if (data === "[DONE]") break;
-
-        try {
-          const parsed = JSON.parse(data);
-
-          if (parsed.status) {
-            setMessages((prev) => {
-              const newMessages = [...prev];
-              const lastMsg = newMessages[newMessages.length - 1];
-              if (lastMsg) lastMsg.content = `*${parsed.status}*`;
-              return [...newMessages];
-            });
+        if (line.startsWith("data: ")) {
+          const data = line.replace("data: ", "").trim();
+          if (data === "[DONE]") {
+            setIsStreaming(false);
+            setCurrentStatus("");
+            break;
           }
 
-          if (parsed.searchStep) {
-            setMessages((prev) => {
-              const newMessages = [...prev];
-              const lastMsg = newMessages[newMessages.length - 1];
-              if (lastMsg) lastMsg.searchSteps = [...(lastMsg.searchSteps || []), parsed.searchStep];
-              return [...newMessages];
-            });
-          }
+          try {
+            const parsed = JSON.parse(data);
 
-          if (parsed.choices?.[0]?.delta?.content) {
-            const token = parsed.choices[0].delta.content;
-            assistantContent += token;
-            setMessages((prev) => {
-              const newMessages = [...prev];
-              const lastMsg = newMessages[newMessages.length - 1];
-              if (lastMsg) {
-                lastMsg.content = assistantContent;
-                lastMsg.searchSteps = [];
-              }
-              return [...newMessages];
-            });
-          }
+            // FIX: Update dedicated status state instead of overwriting msg.content
+            if (parsed.status) {
+              setCurrentStatus(parsed.status);
+            }
 
-          if (parsed.audioBase64) {
-            audioBase64 = parsed.audioBase64;
-            const audio = new Audio(`data:audio/mp3;base64,${audioBase64}`);
-            audio.play().catch((e) => console.error("Audio play failed:", e));
+            if (parsed.choices?.[0]?.delta?.content) {
+              const token = parsed.choices[0].delta.content;
+              assistantContent += token;
+              setMessages((prev) => {
+                const newMessages = [...prev];
+                const lastMsg = newMessages[newMessages.length - 1];
+                if (lastMsg && lastMsg.role === "assistant") {
+                  lastMsg.content = assistantContent;
+                }
+                return newMessages;
+              });
+            }
+
+            if (parsed.audioBase64) {
+              const audio = new Audio(`data:audio/mp3;base64,${parsed.audioBase64}`);
+              audio.play().catch((e) => console.error("Audio play failed:", e));
+            }
+          } catch (e) {
+            // Ignore JSON parse errors on empty lines or incomplete chunks
           }
-        } catch (e) {
-          // Ignore JSON parse errors
         }
       }
     }
 
     setIsStreaming(false);
+    setCurrentStatus("");
   };
 
   const handleSend = async (message: string) => {
     if (!session) return;
 
     const newUserMessage: Message = { role: "user", content: message };
-    setMessages((prev) => [...prev, newUserMessage, { role: "assistant", content: "", searchSteps: [] }]);
+    
+    // FIX: Explicitly define the history to send to prevent React stale closure bugs
+    const messagesToSend = [...messages, newUserMessage];
+    
+    setMessages((prev) => [...prev, newUserMessage, { role: "assistant", content: "" }]);
     setIsStreaming(true);
+    setCurrentStatus("🧠 Initializing...");
 
     try {
       const response = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ messages: [...messages, newUserMessage], conversationId }),
+        body: JSON.stringify({ 
+          messages: messagesToSend, 
+          conversationId,
+          mode: "text" 
+        }),
       });
 
       await handleStreamResponse(response);
     } catch (error) {
       console.error("Chat Error:", error);
       setIsStreaming(false);
+      setCurrentStatus("");
     }
   };
 
@@ -159,6 +163,8 @@ export function ChatContainer() {
       const prompt = params.get('prompt');
       if (prompt) {
         setHasInitialized(true);
+        // FIX: Clean the URL so refreshing the page doesn't re-trigger the prompt
+        window.history.replaceState({}, document.title, window.location.pathname);
         handleSend(prompt);
       }
     }
@@ -218,7 +224,8 @@ export function ChatContainer() {
               </div>
             ) : (
               messages.map((msg, i) => {
-                const isThinking = isStreaming && i === messages.length - 1 && msg.role === "assistant" && msg.content === "" && !msg.searchSteps?.length;
+                // FIX: Use currentStatus to show elegant live updates instead of generic "Thinking..."
+                const isThinking = isStreaming && i === messages.length - 1 && msg.role === "assistant" && msg.content === "";
                 
                 if (isThinking) {
                   return (
@@ -232,7 +239,9 @@ export function ChatContainer() {
                         <div className="mb-1 flex items-center gap-2">
                           <span className="text-sm font-semibold font-mono">Noctryx AI</span>
                         </div>
-                        <span className="text-sm font-mono text-foreground/50 animate-pulse">Thinking...</span>
+                        <span className="text-sm font-mono text-primary animate-pulse">
+                          {currentStatus || "Thinking..."}
+                        </span>
                       </div>
                     </div>
                   );
@@ -244,7 +253,6 @@ export function ChatContainer() {
                     role={msg.role}
                     content={msg.content}
                     isStreaming={isStreaming && i === messages.length - 1 && msg.role === "assistant"}
-                    searchSteps={msg.searchSteps}
                   />
                 );
               })
