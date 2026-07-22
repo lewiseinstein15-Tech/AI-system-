@@ -44,10 +44,7 @@ async function callSingleAI(messages: any[], temp: number, maxTokens: number) {
 async function callAllAI(messages: any[], temp: number, maxTokens: number, timeoutMs = 30000): Promise<{ responses: string[]; providers: string[] }> {
   const providerPromises = PROVIDERS.map(async (p) => {
     const apiKey = process.env[p.key];
-    if (!apiKey) {
-      console.log(`Skipping ${p.name}: No API key`);
-      return null;
-    }
+    if (!apiKey) return null;
 
     const operation = (async () => {
       try {
@@ -64,31 +61,25 @@ async function callAllAI(messages: any[], temp: number, maxTokens: number, timeo
         for await (const d of result.textStream) {
           text += d;
         }
-        console.log(`${p.name} completed successfully, length: ${text.length}`);
         return { text, provider: p.name };
       } catch (streamErr: any) {
-        console.error(`${p.name} stream error:`, streamErr?.message || streamErr);
         throw streamErr;
       }
     })();
 
     const providerTimeout = new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error(`${p.name} timeout after ${timeoutMs}ms`)), timeoutMs)
+      setTimeout(() => reject(new Error(`${p.name} timeout`)), timeoutMs)
     );
 
     try {
-      const resolved = await Promise.race([operation, providerTimeout]);
-      return resolved;
+      return await Promise.race([operation, providerTimeout]);
     } catch (err: any) {
-      console.error(p.name, "ensemble failed:", err?.message || err);
       return null;
     }
   });
 
   const results = await Promise.all(providerPromises);
   const valid = results.filter((r): r is { text: string; provider: string } => r !== null && r.text.length > 10);
-
-  console.log(`Valid responses: ${valid.length} out of ${PROVIDERS.length}`);
 
   if (valid.length === 0) {
     throw new Error("All providers unavailable in ensemble");
@@ -101,61 +92,29 @@ async function callAllAI(messages: any[], temp: number, maxTokens: number, timeo
 }
 
 async function synthesizeResponses(responses: string[], userQuery: string, searchCtx: string): Promise<string> {
-  if (responses.length === 0) {
-    throw new Error("No responses to synthesize");
-  }
-  
-  if (responses.length === 1) {
-    console.log("Only 1 response, returning directly");
-    return responses[0];
-  }
+  if (responses.length === 0) throw new Error("No responses to synthesize");
+  if (responses.length === 1) return responses[0];
 
   const gemini = PROVIDERS.find((p) => p.name === "Gemini");
   if (!gemini || !process.env.GEMINI_API_KEY) {
-    console.log("No Gemini for synthesis, returning longest response");
     return responses.reduce((a, b) => (a.length > b.length ? a : b));
   }
 
-  // FIXED: Stricter prompt with visual formatting examples
   const synthesisPrompt = `You are Noctryx AI. Synthesize these AI responses into ONE highly organized, accurate response.
 
 ⚠️ CRITICAL FORMATTING RULES - YOU MUST FOLLOW THESE EXACTLY:
 
 1. HEADINGS: Every section title MUST start with ### (three hash symbols and a space)
-   ✅ CORRECT: ### How Neural Networks Work
-   ❌ WRONG: How Neural Networks Work
-
 2. BULLET POINTS: Every list item MUST start with - (dash and space)
-   ✅ CORRECT: - **Input Layer**: Receives data
-   ❌ WRONG: Input Layer: Receives data
-
-3. BOLD TEXT: All key terms, technical names, and important concepts MUST be wrapped in **double asterisks**
-   ✅ CORRECT: **backpropagation**, **ReLU**, **GPU**
-   ❌ WRONG: backpropagation, ReLU, GPU
-
-4. PARAGRAPHS: Maximum 2-3 sentences per paragraph. Then add a blank line.
-
-5. STRUCTURE: 
-   - Start with ### heading
-   - Follow with short paragraph OR bullet list
-   - Never write more than 3 sentences without a break
+3. BOLD TEXT: All key terms MUST be wrapped in **double asterisks**
+4. PARAGRAPHS: Maximum 2-3 sentences per paragraph.
 
 EXAMPLE OF CORRECT FORMATTING:
+### Section Title
+Short paragraph here.
 
-### How Neural Networks Work
-
-Neural networks are computational models inspired by the human brain. They learn patterns by processing data through layers.
-
-### Main Components
-
-- **Input Layer**: Receives the raw data and passes it forward.
-- **Hidden Layers**: Perform mathematical computations on the data.
-- **Output Layer**: Produces the final prediction.
-
-### Challenges
-
-- **Data Requirements**: Need huge volumes of labeled data.
-- **Computational Cost**: Require expensive GPUs.
+- **Bold Term**: Explanation here.
+- **Another Term**: Explanation here.
 
 ---
 
@@ -167,7 +126,6 @@ ${responses.map((r, i) => `--- RESPONSE ${i + 1} ---\n${r}`).join("\n\n")}
 Now write the final unified response following the EXACT formatting rules shown above:`;
 
   try {
-    console.log("Starting synthesis with Gemini...");
     const client = createOpenAI({ baseURL: gemini.baseURL, apiKey: process.env.GEMINI_API_KEY! });
     const result = await streamText({
       model: client(gemini.model),
@@ -177,21 +135,16 @@ Now write the final unified response following the EXACT formatting rules shown 
       maxRetries: 0,
     });
     let text = "";
-    for await (const d of result.textStream) {
-      text += d;
-    }
-    console.log("Synthesis completed, length:", text.length);
+    for await (const d of result.textStream) text += d;
     return text;
   } catch (e: any) {
-    console.error("Synthesis failed:", e.message);
-    console.log("Falling back to longest response");
     return responses.reduce((a, b) => (a.length > b.length ? a : b));
   }
 }
 
 async function speechToText(audioBase64: string): Promise<string> {
   const groqKey = process.env.GROQ_API_KEY;
-  if (!groqKey) throw new Error("GROQ_API_KEY required for speech-to-text");
+  if (!groqKey) throw new Error("GROQ_API_KEY required");
   const audioBuffer = Buffer.from(audioBase64, "base64");
   const formData = new FormData();
   formData.append("file", new Blob([audioBuffer], { type: "audio/webm" }), "audio.webm");
@@ -227,35 +180,19 @@ function truncate(str: string | null, max: number) {
 async function fetchTimeout(url: string, opts: any = {}, ms = 3000) {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), ms);
-  try {
-    return await fetch(url, { ...opts, signal: ctrl.signal });
-  } finally {
-    clearTimeout(t);
-  }
+  try { return await fetch(url, { ...opts, signal: ctrl.signal }); } finally { clearTimeout(t); }
 }
 
 async function executeJs(code: string): Promise<{ ok: boolean; stdout: string; stderr: string; unavailable?: boolean }> {
   let sandbox;
   try {
-    sandbox = await Sandbox.create({
-      token: process.env.VERCEL_TOKEN,
-      teamId: process.env.VERCEL_TEAM_ID,
-      projectId: process.env.VERCEL_PROJECT_ID,
-      timeout: 15000,
-      runtime: "node22",
-    });
+    sandbox = await Sandbox.create({ token: process.env.VERCEL_TOKEN, teamId: process.env.VERCEL_TEAM_ID, projectId: process.env.VERCEL_PROJECT_ID, timeout: 15000, runtime: "node22" });
     await sandbox.writeFiles([{ path: "main.js", content: Buffer.from(code) }]);
     const result = await sandbox.runCommand({ cmd: "node", args: ["main.js"] });
-    return { 
-      ok: result.exitCode === 0, 
-      stdout: (await result.stdout()).trim(), 
-      stderr: (await result.stderr()).trim() 
-    };
+    return { ok: result.exitCode === 0, stdout: (await result.stdout()).trim(), stderr: (await result.stderr()).trim() };
   } catch (e: any) {
     return { ok: false, stdout: "", stderr: `Sandbox error: ${e.message}`, unavailable: true };
-  } finally {
-    if (sandbox) { try { await sandbox.stop(); } catch {} }
-  }
+  } finally { if (sandbox) { try { await sandbox.stop(); } catch {} } }
 }
 
 function extractCode(text: string): string | null {
@@ -337,11 +274,11 @@ function buildVerificationFooter(results: VerificationResult[]): string {
   if (contradicted.length > 0) footer += `🔴 **${contradicted.length} claim(s) contradicted by live sources**\n`;
   else if (searchFailed.length > 0) footer += `⚠️ **${searchFailed.length} claim(s) could not be checked** — search APIs failed\n`;
   else if (unverified.length > 0) footer += `🟡 **${unverified.length} claim(s) unverified** — no live sources found\n`;
-  else if (uncertain.length > 0) footer += `🟡 **${uncertain.length} claim(s) uncertain** — sources found but numbers unconfirmed\n`;
+  else if (uncertain.length > 0) footer += ` **${uncertain.length} claim(s) uncertain** — sources found but numbers unconfirmed\n`;
   else footer += `🟢 **All ${verified.length} verifiable claim(s) matched live sources**\n`;
   footer += "\n<details>\n<summary>Verification details</summary>\n\n";
   for (const r of results) {
-    const icon = r.status === "verified" ? "🟢" : r.status === "contradicted" ? "🔴" : r.status === "search-failed" ? "⚠️" : "🟡";
+    const icon = r.status === "verified" ? "🟢" : r.status === "contradicted" ? "" : r.status === "search-failed" ? "⚠️" : "🟡";
     footer += `${icon} **${r.type.toUpperCase()}**: "${truncate(r.claim, 80)}"\n`;
     if (r.sources.length > 0) footer += `   Sources: ${r.sources.join(" | ")}\n`;
     if (r.note) footer += `   Note: ${r.note}\n`;
@@ -395,7 +332,7 @@ export async function POST(req: Request) {
         async start(ctrl) {
           let analysis = "";
           try {
-            ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ status: "📷 Analyzing what I see..." })}\n\n`));
+            ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ status: " Analyzing what I see..." })}\n\n`));
             analysis = await analyzeImageWithGemini(imageBase64, userPrompt);
             const p1 = { choices: [{ delta: { content: analysis } }] };
             ctrl.enqueue(enc.encode(`data: ${JSON.stringify(p1)}\n\n`));
@@ -480,7 +417,6 @@ Your response MUST have exactly 2 sections:
       return new Response(stream, { headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no" } });
     }
 
-    // FIXED: Updated SYSTEM prompt with identity rule and formatting example
     const SYSTEM = `You are Noctryx AI, developed by **Lewis Einstein**, an AI/ML Engineer at **Kibabii University**, launched in **July 2026**.
 
 IDENTITY RULE:
@@ -488,44 +424,17 @@ IDENTITY RULE:
 - For ALL OTHER QUESTIONS, DO NOT introduce yourself. Just answer the question directly.
 
 ⚠️ CRITICAL FORMATTING RULES - YOU MUST FOLLOW THESE EXACTLY:
-
 1. HEADINGS: Every section title MUST start with ### (three hash symbols and a space)
-   ✅ CORRECT: ### How Neural Networks Work
-   ❌ WRONG: How Neural Networks Work
-
 2. BULLET POINTS: Every list item MUST start with - (dash and space)
-   ✅ CORRECT: - **Input Layer**: Receives data
-   ❌ WRONG: Input Layer: Receives data
-
-3. BOLD TEXT: All key terms, technical names, and important concepts MUST be wrapped in **double asterisks**
-   ✅ CORRECT: **backpropagation**, **ReLU**, **GPU**
-   ❌ WRONG: backpropagation, ReLU, GPU
-
-4. PARAGRAPHS: Maximum 2-3 sentences per paragraph. Then add a blank line.
-
-5. STRUCTURE: 
-   - Start with ### heading
-   - Follow with short paragraph OR bullet list
-   - Never write more than 3 sentences without a break
+3. BOLD TEXT: All key terms MUST be wrapped in **double asterisks**
+4. PARAGRAPHS: Maximum 2-3 sentences per paragraph.
 
 EXAMPLE OF CORRECT FORMATTING:
+### Section Title
+Short paragraph here.
 
-### How Neural Networks Work
-
-Neural networks are computational models inspired by the human brain. They learn patterns by processing data through layers.
-
-### Main Components
-
-- **Input Layer**: Receives the raw data and passes it forward.
-- **Hidden Layers**: Perform mathematical computations on the data.
-- **Output Layer**: Produces the final prediction.
-
-### Challenges
-
-- **Data Requirements**: Need huge volumes of labeled data.
-- **Computational Cost**: Require expensive GPUs.
-
----
+- **Bold Term**: Explanation here.
+- **Another Term**: Explanation here.
 
 If no live search results are available, you MUST explicitly say "I'm not certain" rather than fabricating an answer.`;
 
@@ -542,16 +451,16 @@ If no live search results are available, you MUST explicitly say "I'm not certai
             [tavily, wiki, ddg, hn, so, gh, arxiv] = await Promise.all([
               searchTavily(userPrompt), searchWiki(userPrompt), searchDdg(userPrompt), searchHn(userPrompt), searchSo(userPrompt), searchGh(userPrompt), searchArxiv(userPrompt)
             ]);
-          } catch (e) { console.error("Search batch failed, continuing without some sources:", e); }
+          } catch (e) { console.error("Search batch failed:", e); }
 
           let searchCtx = "";
-          if (tavily) searchCtx += `[Tavily] ${truncate(tavily, 400)}\n\n`;
+          if (tavily) searchCtx += `[Tavily] ${truncate(tavily, 300)}\n\n`;
           if (wiki) searchCtx += `[Wikipedia] ${truncate(wiki, 200)}\n\n`;
           if (ddg) searchCtx += `[DuckDuckGo] ${truncate(ddg, 200)}\n\n`;
-          if (hn) searchCtx += `[Hacker News] ${truncate(hn, 200)}\n\n`;
-          if (so) searchCtx += `[StackOverflow] ${truncate(so, 200)}\n\n`;
-          if (gh) searchCtx += `[GitHub] ${truncate(gh, 200)}\n\n`;
-          if (arxiv) searchCtx += `[arXiv] ${truncate(arxiv, 200)}\n\n`;
+          if (hn) searchCtx += `[Hacker News] ${truncate(hn, 150)}\n\n`;
+          if (so) searchCtx += `[StackOverflow] ${truncate(so, 150)}\n\n`;
+          if (gh) searchCtx += `[GitHub] ${truncate(gh, 150)}\n\n`;
+          if (arxiv) searchCtx += `[arXiv] ${truncate(arxiv, 150)}\n\n`;
 
           const hasSearchResults = searchCtx.length > 0;
           if (hasSearchResults) sendStatus("🔎 Found live sources, enhancing answer...");
@@ -561,8 +470,20 @@ If no live search results are available, you MUST explicitly say "I'm not certai
           sendStatus("🧠 Accessing AI brain...");
           const aiMessages = [{ role: "system", content: systemWithSearch }, ...messages.slice(-6).map((m: any) => ({ role: m.role === "assistant" ? "assistant" : "user", content: m.content.includes("data:image") ? "[Image]" : m.content }))];
 
-          sendStatus("🔄 Querying multiple AI models...");
-          const { responses: aiResponses } = await callAllAI(aiMessages, 0.5, 2000);
+          // NEW SAFETY NET: If ensemble fails, fall back to single AI
+          let aiResponses: string[] = [];
+          try {
+            sendStatus("🔄 Querying multiple AI models...");
+            const ensembleResult = await callAllAI(aiMessages, 0.5, 2000);
+            aiResponses = ensembleResult.responses;
+          } catch (ensembleErr: any) {
+            console.error("Ensemble failed, falling back to single AI:", ensembleErr.message);
+            sendStatus("⚠️ Ensemble failed, using single AI fallback...");
+            const { result } = await callSingleAI(aiMessages, 0.5, 2000);
+            let fallbackText = "";
+            for await (const d of result.textStream) fallbackText += d;
+            aiResponses = [fallbackText];
+          }
 
           sendStatus("🔄 Synthesizing best answer...");
           chatTxt = await synthesizeResponses(aiResponses, userPrompt, searchCtx);
@@ -584,7 +505,7 @@ If no live search results are available, you MUST explicitly say "I'm not certai
           const hasHighStakesClaims = claims.some(c => c.type === "price" || c.type === "citation" || (c.type === "percentage" && /approval|probability|chance|rate/i.test(c.text)));
 
           if (autoVerify || hasHighStakesClaims) {
-            sendStatus("🔎 Checking claims against live sources...");
+            sendStatus(" Checking claims against live sources...");
             const results = await Promise.all(claims.slice(0, 5).map(c => verifyClaim(c)));
             const verificationFooter = buildVerificationFooter(results);
             if (verificationFooter) {
