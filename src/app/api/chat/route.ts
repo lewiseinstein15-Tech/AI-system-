@@ -13,7 +13,6 @@ const PROVIDERS = [
   { name: "Gemini", baseURL: "https://generativelanguage.googleapis.com/v1beta/openai", key: "GEMINI_API_KEY", model: process.env.GEMINI_MODEL_ID || "gemini-3.5-flash" },
 ];
 
-// Single provider with fallback chain
 async function callSingleAI(messages: any[], temp: number, maxTokens: number) {
   let lastErr: any = null;
   for (const p of PROVIDERS) {
@@ -39,7 +38,6 @@ async function callSingleAI(messages: any[], temp: number, maxTokens: number) {
   throw new Error("All providers unavailable: " + (lastErr?.message || "unknown"));
 }
 
-// Call ALL providers in parallel with proper per-provider timeout
 async function callAllAI(messages: any[], temp: number, maxTokens: number, timeoutMs = 12000): Promise<{ responses: string[]; providers: string[] }> {
   const providerPromises = PROVIDERS.map(async (p) => {
     const apiKey = process.env[p.key];
@@ -87,7 +85,6 @@ async function callAllAI(messages: any[], temp: number, maxTokens: number, timeo
   };
 }
 
-// Synthesize multiple responses into one
 async function synthesizeResponses(responses: string[], userQuery: string, searchCtx: string): Promise<string> {
   if (responses.length === 1) {
     return responses[0];
@@ -505,9 +502,6 @@ async function analyzeImageWithGemini(base64Image: string, userQuestion: string)
 
   const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
-  // Updated fallback chain: user-set → 3.5-flash → 3.1-flash-lite → 2.5-flash
-  // Note: gemini-2.0-flash and gemini-1.5-flash were shut down June 1, 2026
-  // Note: gemini-2.5-flash is scheduled for shutdown October 16, 2026
   const modelNames = [
     process.env.GEMINI_MODEL_ID,
     "gemini-3.5-flash",
@@ -519,7 +513,7 @@ async function analyzeImageWithGemini(base64Image: string, userQuestion: string)
 
 USER QUESTION: ${userQuestion}
 
-Describe what you see accurately. Be specific about objects, people, text, colors, and spatial relationships. If you cannot clearly see something, say so honestly.`;
+Describe what you see accurately and CONCISELY — 2-3 sentences maximum, since this will be spoken aloud in real time. Be specific about objects, people, text, colors, and spatial relationships. If you cannot clearly see something, say so honestly.`;
 
   let lastError = "";
 
@@ -598,6 +592,17 @@ export async function POST(req: Request) {
             analysis = "*(Vision analysis failed: " + e.message + ")*";
             ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: analysis } }] })}\n\n`));
           }
+
+          try {
+            const audio = await textToSpeech(analysis.replace(/[*#_`]/g, "").substring(0, 500));
+            if (audio) {
+              ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ audioBase64: audio })}\n\n`));
+            }
+          } catch (e: any) {
+            console.error("Live TTS failed:", e.message);
+          }
+
+          ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ conversationId: convId })}\n\n`));
           ctrl.enqueue(enc.encode("data: [DONE]\n\n"));
           ctrl.close();
           try {
@@ -798,7 +803,6 @@ Additional constraints:
         let chatTxt = "";
 
         try {
-          // ALWAYS search for every query - but silently
           const [tavily, wiki, ddg, hn, so, gh, arxiv] = await Promise.all([
             searchTavily(userPrompt),
             searchWiki(userPrompt),
@@ -820,17 +824,14 @@ Additional constraints:
 
           const hasSearchResults = searchCtx.length > 0;
 
-          // Only tell user we searched if we actually found something
           if (hasSearchResults) {
             sendStatus("🔎 Found live sources, enhancing answer...");
           }
 
-          // Build system prompt - only include search if we got results
           const systemWithSearch = hasSearchResults
             ? `${SYSTEM}\n\n---\nLIVE SEARCH RESULTS FOR THIS QUERY (use these to answer accurately, cite sources):\n\n${searchCtx}`
             : SYSTEM;
 
-          // Call ALL AI providers in parallel (ensemble)
           sendStatus("🧠 Accessing AI brain...");
           const aiMessages = [
             { role: "system", content: systemWithSearch },
@@ -842,12 +843,10 @@ Additional constraints:
 
           const { responses: aiResponses, providers } = await callAllAI(aiMessages, 0.5, 2000);
 
-          // Synthesize all responses into one
           sendStatus("🔄 Synthesizing best answer...");
           const synthesized = await synthesizeResponses(aiResponses, userPrompt, searchCtx);
           chatTxt = synthesized;
 
-          // Stream the final synthesized response
           const words = chatTxt.split(" ");
           for (const word of words) {
             ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: word + " " } }] })}\n\n`));
