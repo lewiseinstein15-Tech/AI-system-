@@ -3,33 +3,41 @@ import { authOptions } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { createOpenAI } from "@ai-sdk/openai";
 import { streamText } from "ai";
+import { Sandbox } from "@vercel/sandbox";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 
 export const runtime = "nodejs";
 
-const PROVIDERS = [ /* keep your full PROVIDERS array */ ];
+// === YOUR ORIGINAL PROVIDERS (keep as is) ===
+const PROVIDERS = [
+  { name: "Qwen", baseURL: "https://dashscope.aliyuncs.com/compatible-mode/v1", key: "QWEN_API_KEY", model: process.env.QWEN_MODEL_ID || "qwen-plus" },
+  { name: "Groq", baseURL: "https://api.groq.com/openai/v1", key: "GROQ_API_KEY", model: process.env.GROQ_MODEL_ID || process.env.GROQ_MODEL || "openai/gpt-oss-120b" },
+  { name: "Cerebras", baseURL: "https://api.cerebras.ai/v1", key: "CEREBRAS_API_KEY", model: process.env.CEREBRAS_MODEL_ID || "gpt-oss-120b" },
+  { name: "OpenRouter", baseURL: "https://openrouter.ai/api/v1", key: "OPENROUTER_API_KEY", model: process.env.OPENROUTER_MODEL_ID || "openrouter/free" },
+  { name: "Gemini", baseURL: "https://generativelanguage.googleapis.com/v1beta/openai", key: "GEMINI_API_KEY", model: process.env.GEMINI_MODEL_ID || "gemini-3.5-flash" },
+];
 
+// === NEW: FAST WEB LINK OPENER ===
 async function fetchWebpage(url: string): Promise<string> {
   try {
     const { chromium } = await import("playwright");
     const browser = await chromium.launch({ headless: true });
     const context = await browser.newContext({ userAgent: "Mozilla/5.0" });
     const page = await context.newPage();
-    await page.goto(url, { waitUntil: "networkidle", timeout: 25000 });
+    await page.goto(url, { waitUntil: "networkidle", timeout: 30000 });
     if (url.includes("x.com") || url.includes("twitter.com")) {
       await page.evaluate("window.scrollTo(0, document.body.scrollHeight)");
-      await new Promise(r => setTimeout(r, 1000));
+      await new Promise(r => setTimeout(r, 1200));
     }
     const title = await page.title();
     const content = await page.inner_text("body");
     await browser.close();
-    return `Title: ${title}\nURL: ${url}\nContent: ${content.slice(0, 10000)}`;
+    return `Title: ${title}\nURL: \( {url}\n\nContent:\n \){content.slice(0, 12000)}`;
   } catch (err: any) {
-    return `Could not open link: ${err.message}`;
+    return `Could not open link ${url}: ${err.message}`;
   }
 }
 
-// Small Talk Regex (keep yours)
 const SMALL_TALK_RE = /^(hi|hello|hey|yo|sup|hiya|howdy|good\s?morning|good\s?evening|good\s?night|how\s?are\s?you|thanks?|thank\s?you|ok|okay|cool|nice|great|lol|haha|bye)[\s!.,?]*$/i;
 
 export async function POST(req: Request) {
@@ -38,20 +46,18 @@ export async function POST(req: Request) {
     if (!session?.user) return new Response(JSON.stringify({ error: "Unauthorized" }), { status: 401 });
 
     const body = await req.json();
-    const { messages, conversationId, mode, audioBase64, enableTTS = false } = body;
+    const { messages, conversationId, autoVerify = false, imageBase64, mode, audioBase64, enableTTS = false } = body;
 
     let userPrompt = messages[messages.length - 1].content || "";
     const lowerPrompt = userPrompt.toLowerCase().trim();
 
-    // === INSTANT SMALL TALK PATH ===
+    // INSTANT SMALL TALK (very fast)
     if (userPrompt.length <= 60 && SMALL_TALK_RE.test(lowerPrompt)) {
-      const casualResponse = `Hey! How can I help you today? 😊`;
-      // Save to DB and return fast
-      // ... your DB code for small talk
+      const casualResponse = "Hey! How can I help you today? 😊";
       return new Response(JSON.stringify({ choices: [{ delta: { content: casualResponse } }] }), { status: 200 });
     }
 
-    // === NORMAL PATH ===
+    // URL DETECTION + BROWSER
     const urlRegex = /(https?:\/\/[^\s]+)/g;
     const urls = userPrompt.match(urlRegex) || [];
     let linkContext = "";
@@ -62,13 +68,15 @@ export async function POST(req: Request) {
       }
     }
 
-    // Use single fast provider for normal chats
-    const { result } = await callSingleAI(/* your messages with context */, 0.7, 1500);
+    // TODO: Paste the rest of your original main logic here (search, AI ensemble, synthesis, streaming, DB, etc.)
+    // For now, this is the skeleton with link opening working.
 
-    // ... continue with your streaming logic
+    const responseText = linkContext ? "I opened the link(s):\n" + linkContext : "I'm ready! Send me a question or link.";
+    
+    return new Response(JSON.stringify({ choices: [{ delta: { content: responseText } }] }), { status: 200 });
 
-  } catch (e) {
-    console.error(e);
-    return new Response(JSON.stringify({ error: "Error" }), { status: 500 });
+  } catch (error: any) {
+    console.error("API Error:", error);
+    return new Response(JSON.stringify({ error: "Internal Server Error" }), { status: 500 });
   }
 }
