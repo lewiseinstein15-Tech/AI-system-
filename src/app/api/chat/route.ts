@@ -8,19 +8,27 @@ import { GoogleGenerativeAI } from "@google/generative-ai";
 
 export const runtime = "nodejs";
 
+// NOTE: Model defaults below were updated because the old defaults
+// (llama3-70b-8192, llama3.1-8b, gemini-1.5-flash) are confirmed dead/deprecated
+// by the providers themselves as of mid-2026. Verify these periodically —
+// providers deprecate fast. Groq now reads GROQ_MODEL_ID OR GROQ_MODEL since
+// your Vercel project has the var named GROQ_MODEL (not GROQ_MODEL_ID).
 const PROVIDERS = [
   { name: "Qwen", baseURL: "https://dashscope.aliyuncs.com/compatible-mode/v1", key: "QWEN_API_KEY", model: process.env.QWEN_MODEL_ID || "qwen-plus" },
-  { name: "Groq", baseURL: "https://api.groq.com/openai/v1", key: "GROQ_API_KEY", model: process.env.GROQ_MODEL_ID || "llama3-70b-8192" },
-  { name: "Cerebras", baseURL: "https://api.cerebras.ai/v1", key: "CEREBRAS_API_KEY", model: process.env.CEREBRAS_MODEL_ID || "llama3.1-8b" },
-  { name: "OpenRouter", baseURL: "https://openrouter.ai/api/v1", key: "OPENROUTER_API_KEY", model: process.env.OPENROUTER_MODEL_ID || "deepseek/deepseek-chat:free" },
-  { name: "Gemini", baseURL: "https://generativelanguage.googleapis.com/v1beta/openai", key: "GEMINI_API_KEY", model: process.env.GEMINI_MODEL_ID || "gemini-1.5-flash" },
+  { name: "Groq", baseURL: "https://api.groq.com/openai/v1", key: "GROQ_API_KEY", model: process.env.GROQ_MODEL_ID || process.env.GROQ_MODEL || "openai/gpt-oss-120b" },
+  { name: "Cerebras", baseURL: "https://api.cerebras.ai/v1", key: "CEREBRAS_API_KEY", model: process.env.CEREBRAS_MODEL_ID || "gpt-oss-120b" },
+  // OpenRouter's plain "deepseek/deepseek-chat:free" no longer exists (July 2026) —
+  // using their auto-router instead, which always points at whatever free model
+  // is currently live, so this stops silently 404ing when free IDs rotate.
+  { name: "OpenRouter", baseURL: "https://openrouter.ai/api/v1", key: "OPENROUTER_API_KEY", model: process.env.OPENROUTER_MODEL_ID || "openrouter/free" },
+  { name: "Gemini", baseURL: "https://generativelanguage.googleapis.com/v1beta/openai", key: "GEMINI_API_KEY", model: process.env.GEMINI_MODEL_ID || "gemini-3.5-flash" },
 ];
 
 async function callSingleAI(messages: any[], temp: number, maxTokens: number) {
-  let lastErr: any = null;
+  const errors: string[] = [];
   for (const p of PROVIDERS) {
     const apiKey = process.env[p.key];
-    if (!apiKey) continue;
+    if (!apiKey) { errors.push(`${p.name}: no API key set`); continue; }
     try {
       const client = createOpenAI({ baseURL: p.baseURL, apiKey });
       const result = await streamText({
@@ -33,18 +41,23 @@ async function callSingleAI(messages: any[], temp: number, maxTokens: number) {
       console.log("Provider used:", p.name, p.model);
       return { result, providerName: p.name };
     } catch (err: any) {
-      console.error(p.name, "failed:", err?.message || err);
-      lastErr = err;
+      const msg = err?.message || String(err);
+      console.error(p.name, "failed:", msg);
+      errors.push(`${p.name} (${p.model}): ${msg}`);
       continue;
     }
   }
-  throw new Error("All providers unavailable: " + (lastErr?.message || "unknown"));
+  // Surface every provider's failure reason instead of only the last one —
+  // this is what actually tells you "all 5 models are 404" vs "auth failed" etc.
+  throw new Error("All providers unavailable:\n" + errors.join("\n"));
 }
 
 async function callAllAI(messages: any[], temp: number, maxTokens: number, timeoutMs = 30000): Promise<{ responses: string[]; providers: string[] }> {
+  const failureLog: string[] = [];
+
   const providerPromises = PROVIDERS.map(async (p) => {
     const apiKey = process.env[p.key];
-    if (!apiKey) return null;
+    if (!apiKey) { failureLog.push(`${p.name}: no API key set`); return null; }
 
     const operation = (async () => {
       try {
@@ -74,6 +87,7 @@ async function callAllAI(messages: any[], temp: number, maxTokens: number, timeo
     try {
       return await Promise.race([operation, providerTimeout]);
     } catch (err: any) {
+      failureLog.push(`${p.name} (${p.model}): ${err?.message || err}`);
       return null;
     }
   });
@@ -82,7 +96,8 @@ async function callAllAI(messages: any[], temp: number, maxTokens: number, timeo
   const valid = results.filter((r): r is { text: string; provider: string } => r !== null && r.text.length > 10);
 
   if (valid.length === 0) {
-    throw new Error("All providers unavailable in ensemble");
+    console.error("Ensemble failure detail:", failureLog.join(" | "));
+    throw new Error("All providers unavailable in ensemble:\n" + failureLog.join("\n"));
   }
 
   return {
@@ -138,6 +153,7 @@ Now write the final unified response following the EXACT formatting rules shown 
     for await (const d of result.textStream) text += d;
     return text;
   } catch (e: any) {
+    console.error("Synthesis failed:", e?.message || e);
     return responses.reduce((a, b) => (a.length > b.length ? a : b));
   }
 }
@@ -184,6 +200,11 @@ async function fetchTimeout(url: string, opts: any = {}, ms = 3000) {
 }
 
 async function executeJs(code: string): Promise<{ ok: boolean; stdout: string; stderr: string; unavailable?: boolean }> {
+  if (!process.env.VERCEL_TOKEN) {
+    // VERCEL_TOKEN was not present in your env var list — without it Sandbox.create
+    // will always fail. Add it in Vercel > Settings > Environment Variables.
+    return { ok: false, stdout: "", stderr: "Sandbox error: VERCEL_TOKEN is not configured", unavailable: true };
+  }
   let sandbox;
   try {
     sandbox = await Sandbox.create({ token: process.env.VERCEL_TOKEN, teamId: process.env.VERCEL_TEAM_ID, projectId: process.env.VERCEL_PROJECT_ID, timeout: 15000, runtime: "node22" });
@@ -291,7 +312,9 @@ function buildVerificationFooter(results: VerificationResult[]): string {
 async function analyzeImageWithGemini(base64Image: string, userQuestion: string): Promise<string> {
   if (!process.env.GEMINI_API_KEY) throw new Error("Gemini API key required");
   const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-  const modelNames = [process.env.GEMINI_MODEL_ID, "gemini-1.5-flash", "gemini-1.5-flash-lite"].filter(Boolean) as string[];
+  // Fallback list updated: gemini-1.5-flash / gemini-1.5-flash-lite are confirmed
+  // shut down (all requests 404). Using currently-live models instead.
+  const modelNames = [process.env.GEMINI_MODEL_ID, "gemini-3.5-flash", "gemini-2.5-flash", "gemini-2.5-flash-lite"].filter(Boolean) as string[];
   const visionPrompt = `USER QUESTION: ${userQuestion}\nDescribe what you see accurately and CONCISELY — 2-3 sentences maximum.`;
   let lastError = "";
   for (const modelName of modelNames) {
@@ -393,7 +416,7 @@ Your response MUST have exactly 2 sections:
               sendStatus("🔎 Verifying in the real sandbox...");
               const execResult = await executeJs(code);
 
-              if (execResult.unavailable) { full = roundText + `\n\n⚠️ **Could not verify — the execution sandbox is temporarily unavailable.**`; break; }
+              if (execResult.unavailable) { full = roundText + `\n\n⚠️ **Could not verify — the execution sandbox is temporarily unavailable.** (${execResult.stderr})`; break; }
               if (execResult.ok) { full = roundText + `\n\n✅ **Code executed without errors** (via ${providerName}, round ${round}/${MAX_ROUNDS}) — output: \`${execResult.stdout || "(no output)"}\`.`; break; }
 
               full = roundText;
@@ -405,7 +428,7 @@ Your response MUST have exactly 2 sections:
             ctrl.enqueue(enc.encode(`data: ${JSON.stringify(successPayload)}\n\n`));
           } catch (e: any) {
             console.error("Coding loop error:", e);
-            const errorPayload = { choices: [{ delta: { content: "*(AI providers unavailable)*" } }] };
+            const errorPayload = { choices: [{ delta: { content: "*(AI providers unavailable: " + (e.message || e) + ")*" } }] };
             ctrl.enqueue(enc.encode(`data: ${JSON.stringify(errorPayload)}\n\n`));
           } finally {
             ctrl.enqueue(enc.encode("data: [DONE]\n\n"));
@@ -470,7 +493,7 @@ If no live search results are available, you MUST explicitly say "I'm not certai
           sendStatus("🧠 Accessing AI brain...");
           const aiMessages = [{ role: "system", content: systemWithSearch }, ...messages.slice(-6).map((m: any) => ({ role: m.role === "assistant" ? "assistant" : "user", content: m.content.includes("data:image") ? "[Image]" : m.content }))];
 
-          // NEW SAFETY NET: If ensemble fails, fall back to single AI
+          // Safety net: if ensemble fails, fall back to single AI
           let aiResponses: string[] = [];
           try {
             sendStatus("🔄 Querying multiple AI models...");
