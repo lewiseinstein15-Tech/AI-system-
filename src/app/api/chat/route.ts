@@ -378,7 +378,45 @@ export async function POST(req: Request) {
       return new Response(stream, { headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no" } });
     }
 
-    const isCoding = lowerPrompt.includes("code") || lowerPrompt.includes("algorithm") || lowerPrompt.includes("function") || lowerPrompt.includes("write a") || lowerPrompt.includes("array") || lowerPrompt.includes("tree");
+    // Small talk: short greetings/pleasantries shouldn't trigger live search or
+    // the ### heading / bullet formatting rules — they read as absurd for "hi".
+    const SMALL_TALK_RE = /^(hi|hello|hey|yo|sup|hiya|howdy|good\s?morning|good\s?evening|good\s?night|goodnight|how\s?are\s?you|how'?s\s?it\s?going|what'?s\s?up|whats\s?up|thanks?|thank\s?you|thanks?\s?a\s?lot|ok|okay|cool|nice|great|lol|haha|bye|goodbye|see\s?you|see\s?ya|good\s?day)[\s!.,?]*$/i;
+    const isSmallTalk = userPrompt.trim().length <= 40 && SMALL_TALK_RE.test(userPrompt.trim());
+
+    const isCoding = !isSmallTalk && (lowerPrompt.includes("code") || lowerPrompt.includes("algorithm") || lowerPrompt.includes("function") || lowerPrompt.includes("write a") || lowerPrompt.includes("array") || lowerPrompt.includes("tree"));
+
+    if (isSmallTalk) {
+      const enc = new TextEncoder();
+      const CASUAL_SYSTEM = `You are Noctryx AI, a friendly assistant. The user just sent a short conversational message (a greeting, thanks, or similar small talk).
+Reply naturally and briefly — like a real conversation, not a report.
+Do NOT use headings (###), bullet points, or bold formatting for this kind of message.
+Do NOT explain the etymology or history of common words/phrases.
+Keep it to 1-2 short sentences.
+ONLY mention your identity (Noctryx AI, built by Lewis Einstein) if explicitly asked "who are you" or similar.`;
+      const stream = new ReadableStream({
+        async start(ctrl) {
+          let chatTxt = "";
+          try {
+            const { result } = await callSingleAI([{ role: "system", content: CASUAL_SYSTEM }, { role: "user", content: userPrompt }], 0.7, 100);
+            for await (const d of result.textStream) {
+              chatTxt += d;
+              ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: d } }] })}\n\n`));
+            }
+          } catch (e: any) {
+            console.error("Small talk error:", e);
+            chatTxt = "Hey! How can I help you today?";
+            ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: chatTxt } }] })}\n\n`));
+          }
+          ctrl.enqueue(enc.encode("data: [DONE]\n\n"));
+          ctrl.close();
+          try {
+            await prisma.message.create({ data: { conversationId: convId, role: "assistant", content: chatTxt } });
+            await prisma.conversation.update({ where: { id: convId }, data: { updatedAt: new Date() } });
+          } catch (e) { console.error("DB error:", e); }
+        },
+      });
+      return new Response(stream, { headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no" } });
+    }
 
     if (isCoding) {
       const enc = new TextEncoder();
