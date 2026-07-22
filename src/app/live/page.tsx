@@ -13,16 +13,20 @@ export default function LivePage() {
   const [caption, setCaption] = useState("Point your camera at something and tap Start Live.");
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [cameraReady, setCameraReady] = useState(false);
+  const [flashOn, setFlashOn] = useState(false);
+  const [galleryPreview, setGalleryPreview] = useState<string | null>(null);
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const audioElRef = useRef<HTMLAudioElement | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const loopTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const conversationIdRef = useRef<string | null>(null);
   const isLoopingRef = useRef(false);
   const router = useRouter();
 
+  // Camera
   useEffect(() => {
     startCamera();
     return () => {
@@ -59,6 +63,55 @@ export default function LivePage() {
     setCameraReady(false);
   };
 
+  // Flash / Torch
+  const toggleFlash = async () => {
+    const stream = streamRef.current;
+    if (!stream) return;
+
+    const track = stream.getVideoTracks()[0];
+    if (!track) return;
+
+    try {
+      const capabilities = track.getCapabilities() as any;
+      if (!capabilities?.torch) {
+        setErrorMsg("Flash/torch not supported on this device.");
+        setTimeout(() => setErrorMsg(null), 3000);
+        return;
+      }
+
+      const newState = !flashOn;
+      await track.applyConstraints({
+        advanced: [{ torch: newState }],
+      });
+      setFlashOn(newState);
+    } catch (err: any) {
+      console.error("Flash toggle failed:", err);
+      setErrorMsg("Could not toggle flash.");
+      setTimeout(() => setErrorMsg(null), 3000);
+    }
+  };
+
+  // Gallery / File Input
+  const handleGalleryClick = () => {
+    fileInputRef.current?.click();
+  };
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const result = ev.target?.result as string;
+      if (result) {
+        setGalleryPreview(result);
+        analyzeImage(result);
+      }
+    };
+    reader.readAsDataURL(file);
+  };
+
+  // Frame Capture
   const captureFrame = (): string | null => {
     if (!videoRef.current || !canvasRef.current) return null;
     const video = videoRef.current;
@@ -71,23 +124,24 @@ export default function LivePage() {
     return canvas.toDataURL("image/jpeg", 0.7);
   };
 
-  const playAudio = (base64: string) => {
+  // Audio Playback
+  const playAudio = async (base64: string) => {
     try {
       if (audioElRef.current) {
         audioElRef.current.pause();
+        audioElRef.current.currentTime = 0;
       }
+
       const audio = new Audio(`data:audio/mp3;base64,${base64}`);
       audioElRef.current = audio;
-      audio.play().catch((e) => console.error("Audio play failed:", e));
-    } catch (e) {
-      console.error("Audio setup failed:", e);
+      await audio.play();
+    } catch (e: any) {
+      console.error("Audio play failed:", e);
     }
   };
 
-  const analyzeOnce = useCallback(async () => {
-    const frame = captureFrame();
-    if (!frame) return;
-
+  // Core Analysis
+  const analyzeImage = useCallback(async (imageDataUrl: string) => {
     setIsAnalyzing(true);
     setErrorMsg(null);
 
@@ -98,7 +152,7 @@ export default function LivePage() {
         body: JSON.stringify({
           messages: [{ role: "user", content: liveQuestion }],
           mode: "live",
-          imageBase64: frame.split(",")[1],
+          imageBase64: imageDataUrl.split(",")[1],
           conversationId: conversationIdRef.current,
         }),
       });
@@ -153,7 +207,7 @@ export default function LivePage() {
         setCaption(fullText.trim());
       }
       if (audioB64) {
-        playAudio(audioB64);
+        await playAudio(audioB64);
       }
     } catch (error: any) {
       console.error("Live analysis failed:", error);
@@ -163,6 +217,16 @@ export default function LivePage() {
     }
   }, [liveQuestion]);
 
+  const analyzeOnce = useCallback(async () => {
+    const frame = captureFrame();
+    if (!frame) {
+      setErrorMsg("Camera not ready. Please wait a moment and try again.");
+      return;
+    }
+    await analyzeImage(frame);
+  }, [analyzeImage]);
+
+  // Live Loop
   const startLoop = () => {
     if (isLoopingRef.current) return;
     isLoopingRef.current = true;
@@ -204,6 +268,15 @@ export default function LivePage() {
 
   return (
     <div className="flex flex-col h-screen bg-background text-foreground">
+      {/* Hidden file input for Gallery */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="image/*"
+        className="hidden"
+        onChange={handleFileChange}
+      />
+
       <header className="flex items-center justify-between p-4 border-b border-border">
         <button
           onClick={goBack}
@@ -224,13 +297,22 @@ export default function LivePage() {
 
       <div className="flex-1 flex flex-col items-center justify-center p-4 relative">
         <div className="relative w-full max-w-md aspect-[3/4] rounded-2xl overflow-hidden border-2 border-primary/30 bg-black">
-          <video
-            ref={videoRef}
-            autoPlay
-            playsInline
-            muted
-            className="w-full h-full object-cover"
-          />
+          {galleryPreview ? (
+            <img
+              src={galleryPreview}
+              alt="Selected"
+              className="w-full h-full object-contain"
+            />
+          ) : (
+            <video
+              ref={videoRef}
+              autoPlay
+              playsInline
+              muted
+              className="w-full h-full object-cover"
+            />
+          )}
+
           <div className="absolute top-4 left-4 w-8 h-8 border-t-2 border-l-2 border-primary"></div>
           <div className="absolute top-4 right-4 w-8 h-8 border-t-2 border-r-2 border-primary"></div>
           <div className="absolute bottom-4 left-4 w-8 h-8 border-b-2 border-l-2 border-primary"></div>
@@ -240,6 +322,12 @@ export default function LivePage() {
             <div className="absolute top-3 right-3 flex items-center gap-1 bg-black/60 rounded-full px-2 py-1">
               <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse"></span>
               <span className="text-xs font-mono text-red-400">LIVE</span>
+            </div>
+          )}
+
+          {galleryPreview && (
+            <div className="absolute top-3 left-3 bg-primary/80 text-black text-xs font-mono px-2 py-1 rounded">
+              Gallery
             </div>
           )}
 
@@ -265,8 +353,9 @@ export default function LivePage() {
             How it works
           </h3>
           <ul className="space-y-1 text-xs text-foreground/70 font-mono">
-            <li>• Tap "Start Live" for continuous real-time analysis every few seconds.</li>
-            <li>• Or tap "Analyze" for a single one-off capture.</li>
+            <li>• Tap &quot;Start Live&quot; for continuous real-time analysis every few seconds.</li>
+            <li>• Or tap &quot;Analyze&quot; for a single one-off capture.</li>
+            <li>• Tap &quot;Gallery&quot; to pick a photo from your device.</li>
             <li>• Responses are spoken aloud automatically.</li>
           </ul>
         </div>
@@ -283,7 +372,7 @@ export default function LivePage() {
           />
           <button
             onClick={analyzeOnce}
-            disabled={isAnalyzing || isLooping || !cameraReady}
+            disabled={isAnalyzing || isLooping || (!cameraReady && !galleryPreview)}
             className="bg-primary text-black px-6 py-3 rounded-lg font-medium font-mono hover:bg-primary/90 transition-colors disabled:opacity-50"
           >
             {isAnalyzing ? "..." : "🔍 Analyze"}
@@ -291,12 +380,18 @@ export default function LivePage() {
         </div>
 
         <div className="flex items-center justify-center gap-8">
-          <button className="flex flex-col items-center gap-1 text-foreground/40 hover:text-primary transition-colors">
+          {/* Gallery Button */}
+          <button
+            onClick={handleGalleryClick}
+            className="flex flex-col items-center gap-1 text-foreground/40 hover:text-primary transition-colors"
+          >
             <div className="w-12 h-12 rounded-full border border-border flex items-center justify-center">
               <Image className="h-5 w-5" />
             </div>
             <span className="text-xs font-mono">Gallery</span>
           </button>
+
+          {/* Start/Stop Live */}
           <button
             onClick={toggleLoop}
             disabled={!cameraReady}
@@ -317,11 +412,20 @@ export default function LivePage() {
               {isLooping ? "Stop Live" : "Start Live"}
             </span>
           </button>
-          <button className="flex flex-col items-center gap-1 text-foreground/40 hover:text-primary transition-colors">
-            <div className="w-12 h-12 rounded-full border border-border flex items-center justify-center">
-              <Zap className="h-5 w-5" />
+
+          {/* Flash Button */}
+          <button
+            onClick={toggleFlash}
+            className={`flex flex-col items-center gap-1 transition-colors ${
+              flashOn ? "text-yellow-400" : "text-foreground/40 hover:text-primary"
+            }`}
+          >
+            <div className={`w-12 h-12 rounded-full border flex items-center justify-center ${
+              flashOn ? "border-yellow-400 bg-yellow-400/10" : "border-border"
+            }`}>
+              <Zap className={`h-5 w-5 ${flashOn ? "fill-yellow-400" : ""}`} />
             </div>
-            <span className="text-xs font-mono">Flash</span>
+            <span className="text-xs font-mono">{flashOn ? "On" : "Flash"}</span>
           </button>
         </div>
       </div>
