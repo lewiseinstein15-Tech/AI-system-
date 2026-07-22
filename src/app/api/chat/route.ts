@@ -10,8 +10,8 @@ export const runtime = "nodejs";
 
 const PROVIDERS = [
   { name: "Qwen", baseURL: "https://dashscope.aliyuncs.com/compatible-mode/v1", key: "QWEN_API_KEY", model: process.env.QWEN_MODEL_ID || "qwen-plus" },
-  { name: "Cerebras", baseURL: "https://api.cerebras.ai/v1", key: "CEREBRAS_API_KEY", model: process.env.CEREBRAS_MODEL_ID || "llama3.1-8b" },
   { name: "Groq", baseURL: "https://api.groq.com/openai/v1", key: "GROQ_API_KEY", model: process.env.GROQ_MODEL_ID || "llama3-70b-8192" },
+  { name: "Cerebras", baseURL: "https://api.cerebras.ai/v1", key: "CEREBRAS_API_KEY", model: process.env.CEREBRAS_MODEL_ID || "llama3.1-8b" },
   { name: "OpenRouter", baseURL: "https://openrouter.ai/api/v1", key: "OPENROUTER_API_KEY", model: process.env.OPENROUTER_MODEL_ID || "deepseek/deepseek-chat:free" },
   { name: "Gemini", baseURL: "https://generativelanguage.googleapis.com/v1beta/openai", key: "GEMINI_API_KEY", model: process.env.GEMINI_MODEL_ID || "gemini-1.5-flash" },
 ];
@@ -41,7 +41,8 @@ async function callSingleAI(messages: any[], temp: number, maxTokens: number) {
   throw new Error("All providers unavailable: " + (lastErr?.message || "unknown"));
 }
 
-async function callAllAI(messages: any[], temp: number, maxTokens: number, timeoutMs = 15000): Promise<{ responses: string[]; providers: string[] }> {
+// FIX 1: Increased timeout to 25s to prevent premature crashes on slower/free models
+async function callAllAI(messages: any[], temp: number, maxTokens: number, timeoutMs = 25000): Promise<{ responses: string[]; providers: string[] }> {
   const providerPromises = PROVIDERS.map(async (p) => {
     const apiKey = process.env[p.key];
     if (!apiKey) return null;
@@ -98,15 +99,22 @@ async function synthesizeResponses(responses: string[], userQuery: string, searc
     return responses.reduce((a, b) => (a.length > b.length ? a : b));
   }
 
-  const synthesisPrompt = `You are Noctryx AI. Multiple AI systems have analyzed the user question. Synthesize their answers into ONE coherent, accurate response.
-RULES:
-- Do NOT mention that you used multiple AI models or providers.
-- Write as if YOU are the sole author.
-- Resolve contradictions by picking the most accurate info.
+  // FIX 2: Strict formatting prompt for synthesis
+  const synthesisPrompt = `You are Noctryx AI. Synthesize these AI responses into ONE highly organized, accurate response.
+
+UNIVERSAL FORMATTING RULES (MUST FOLLOW):
+1. NEVER output a "wall of text". Break everything into short paragraphs (2-3 sentences max).
+2. Use Markdown headings (###) to separate different topics or steps.
+3. Use bullet points (-) for lists, features, or sequential steps.
+4. Bold (**text**) key terms, numbers, or final conclusions.
+5. If this is a math or logic problem, strictly follow the 7-step math format.
+
 ${searchCtx ? `SEARCH CONTEXT:\n${searchCtx}\n\n` : ""}USER QUESTION: ${userQuery}
+
 RESPONSES TO SYNTHESIZE:
 ${responses.map((r, i) => `--- RESPONSE ${i + 1} ---\n${r}`).join("\n\n")}
-Now write the final unified response:`;
+
+Now write the final unified, perfectly formatted response:`;
 
   try {
     const client = createOpenAI({ baseURL: gemini.baseURL, apiKey: process.env.GEMINI_API_KEY! });
@@ -124,7 +132,8 @@ Now write the final unified response:`;
     return text;
   } catch (e: any) {
     console.error("Synthesis failed:", e.message);
-    return responses[0];
+    // Fallback to the longest response instead of crashing
+    return responses.reduce((a, b) => (a.length > b.length ? a : b));
   }
 }
 
@@ -204,70 +213,17 @@ function extractCode(text: string): string | null {
   return g ? g[1].trim() : null;
 }
 
-async function searchWiki(q: string) {
-  try {
-    const s = await fetchTimeout(`https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(q)}&format=json&origin=*`);
-    const d = await s.json();
-    if (d.query?.search?.[0]) {
-      const sum = await fetchTimeout(`https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(d.query.search[0].title)}`);
-      const sd = await sum.json();
-      if (sd.extract) return `Wikipedia: ${sd.extract}`;
-    }
-  } catch {}
-  return null;
-}
-async function searchDdg(q: string) {
-  try {
-    const r = await fetchTimeout(`https://api.duckduckgo.com/?q=${encodeURIComponent(q)}&format=json&no_html=1&skip_disambig=1`, { headers: { Accept: "application/json", "User-Agent": "NoctryxBot/1.0" } });
-    const d = await r.json();
-    if (d.AbstractText) return `DuckDuckGo: ${d.AbstractText}`;
-    if (d.RelatedTopics?.[0]?.Text) return `DuckDuckGo: ${d.RelatedTopics[0].Text}`;
-  } catch {}
-  return null;
-}
-async function searchHn(q: string) {
-  try {
-    const r = await fetchTimeout(`https://hn.algolia.com/api/v1/search?query=${encodeURIComponent(q)}&tags=story&hitsPerPage=2`);
-    const d = await r.json();
-    if (d.hits?.length) return `Hacker News: ${d.hits.map((h: any) => h.title).join(" | ")}`;
-  } catch {}
-  return null;
-}
-async function searchSo(q: string) {
-  try {
-    const r = await fetchTimeout(`https://api.stackexchange.com/2.3/search/advanced?order=desc&sort=relevance&q=${encodeURIComponent(q)}&site=stackoverflow&pagesize=2`);
-    const d = await r.json();
-    if (d.items?.length) return `StackOverflow: ${d.items.map((i: any) => i.title).join(" | ")}`;
-  } catch {}
-  return null;
-}
-async function searchGh(q: string) {
-  try {
-    const h: Record<string, string> = { Accept: "application/vnd.github.v3+json" };
-    if (process.env.GITHUB_TOKEN) h.Authorization = `token ${process.env.GITHUB_TOKEN}`;
-    const r = await fetchTimeout(`https://api.github.com/search/repositories?q=${encodeURIComponent(q)}&sort=stars&order=desc&per_page=2`, { headers: h });
-    const d = await r.json();
-    if (d.items?.length) return `GitHub: ${d.items.map((i: any) => i.full_name).join(" | ")}`;
-  } catch {}
-  return null;
-}
-async function searchArxiv(q: string) {
-  try {
-    const r = await fetchTimeout(`https://export.arxiv.org/api/query?search_query=all:${encodeURIComponent(q)}&max_results=2`);
-    const t = await r.text();
-    const titles = [...t.matchAll(/<title>(.*?)<\/title>/g)].map((m) => m[1]).filter((t) => t !== "arXiv Query Result");
-    if (titles.length) return `arXiv Papers: ${titles.join(" | ")}`;
-  } catch {}
-  return null;
-}
+// --- SEARCH FUNCTIONS (Unchanged, they are robust) ---
+async function searchWiki(q: string) { try { const s = await fetchTimeout(`https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(q)}&format=json&origin=*`); const d = await s.json(); if (d.query?.search?.[0]) { const sum = await fetchTimeout(`https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(d.query.search[0].title)}`); const sd = await sum.json(); if (sd.extract) return `Wikipedia: ${sd.extract}`; } } catch {} return null; }
+async function searchDdg(q: string) { try { const r = await fetchTimeout(`https://api.duckduckgo.com/?q=${encodeURIComponent(q)}&format=json&no_html=1&skip_disambig=1`, { headers: { Accept: "application/json", "User-Agent": "NoctryxBot/1.0" } }); const d = await r.json(); if (d.AbstractText) return `DuckDuckGo: ${d.AbstractText}`; if (d.RelatedTopics?.[0]?.Text) return `DuckDuckGo: ${d.RelatedTopics[0].Text}`; } catch {} return null; }
+async function searchHn(q: string) { try { const r = await fetchTimeout(`https://hn.algolia.com/api/v1/search?query=${encodeURIComponent(q)}&tags=story&hitsPerPage=2`); const d = await r.json(); if (d.hits?.length) return `Hacker News: ${d.hits.map((h: any) => h.title).join(" | ")}`; } catch {} return null; }
+async function searchSo(q: string) { try { const r = await fetchTimeout(`https://api.stackexchange.com/2.3/search/advanced?order=desc&sort=relevance&q=${encodeURIComponent(q)}&site=stackoverflow&pagesize=2`); const d = await r.json(); if (d.items?.length) return `StackOverflow: ${d.items.map((i: any) => i.title).join(" | ")}`; } catch {} return null; }
+async function searchGh(q: string) { try { const h: Record<string, string> = { Accept: "application/vnd.github.v3+json" }; if (process.env.GITHUB_TOKEN) h.Authorization = `token ${process.env.GITHUB_TOKEN}`; const r = await fetchTimeout(`https://api.github.com/search/repositories?q=${encodeURIComponent(q)}&sort=stars&order=desc&per_page=2`, { headers: h }); const d = await r.json(); if (d.items?.length) return `GitHub: ${d.items.map((i: any) => i.full_name).join(" | ")}`; } catch {} return null; }
+async function searchArxiv(q: string) { try { const r = await fetchTimeout(`https://export.arxiv.org/api/query?search_query=all:${encodeURIComponent(q)}&max_results=2`); const t = await r.text(); const titles = [...t.matchAll(/<title>(.*?)<\/title>/g)].map((m) => m[1]).filter((t) => t !== "arXiv Query Result"); if (titles.length) return `arXiv Papers: ${titles.join(" | ")}`; } catch {} return null; }
 async function searchTavily(q: string) {
   if (!process.env.TAVILY_API_KEY) return null;
   try {
-    const r = await fetchTimeout("https://api.tavily.com/search", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ api_key: process.env.TAVILY_API_KEY, query: q, max_results: 2, include_answer: true }),
-    }, 5000);
+    const r = await fetchTimeout("https://api.tavily.com/search", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ api_key: process.env.TAVILY_API_KEY, query: q, max_results: 2, include_answer: true }) }, 5000);
     const d = await r.json();
     let out = "";
     if (d.answer) out += `Summary: ${d.answer}\n`;
@@ -277,36 +233,24 @@ async function searchTavily(q: string) {
   return null;
 }
 
+// --- CLAIM VERIFICATION (Unchanged) ---
 interface Claim { text: string; type: "price" | "percentage" | "citation" | "statistic" | "attribution"; }
-function stripMarkdown(text: string): string {
-  return text.replace(/\|/g, " ").replace(/[*#_`]/g, "").replace(/\n/g, " ").replace(/\s+/g, " ").trim();
-}
+function stripMarkdown(text: string): string { return text.replace(/\|/g, " ").replace(/[*#_`]/g, "").replace(/\n/g, " ").replace(/\s+/g, " ").trim(); }
 function extractClaims(text: string): Claim[] {
-  const claims: Claim[] = [];
-  const cleanText = stripMarkdown(text);
-  const priceRegex = /\$\d{1,3}(?:,\d{3})+(?:\.\d+)?(?:\s*(?:million|billion|yr|year|per year|\/yr))?/gi;
-  let match;
-  while ((match = priceRegex.exec(cleanText)) !== null) {
-    const context = cleanText.substring(Math.max(0, match.index - 40), Math.min(cleanText.length, match.index + 40));
-    claims.push({ text: `${match[0]} (${context.trim()})`, type: "price" });
-  }
+  const claims: Claim[] = []; const cleanText = stripMarkdown(text);
+  const priceRegex = /\$\d{1,3}(?:,\d{3})+(?:\.\d+)?(?:\s*(?:million|billion|yr|year|per year|\/yr))?/gi; let match;
+  while ((match = priceRegex.exec(cleanText)) !== null) { const context = cleanText.substring(Math.max(0, match.index - 40), Math.min(cleanText.length, match.index + 40)); claims.push({ text: `${match[0]} (${context.trim()})`, type: "price" }); }
   const pctRegex = /\d{1,3}(?:\.\d+)?%/g;
-  while ((match = pctRegex.exec(cleanText)) !== null) {
-    const context = cleanText.substring(Math.max(0, match.index - 30), Math.min(cleanText.length, match.index + 30));
-    if (/from|per|in|of|rate|probability|chance/i.test(context)) claims.push({ text: `${match[0]} (${context.trim()})`, type: "percentage" });
-  }
+  while ((match = pctRegex.exec(cleanText)) !== null) { const context = cleanText.substring(Math.max(0, match.index - 30), Math.min(cleanText.length, match.index + 30)); if (/from|per|in|of|rate|probability|chance/i.test(context)) claims.push({ text: `${match[0]} (${context.trim()})`, type: "percentage" }); }
   const citeRegex = /([A-Z][a-z]+(?:\s+(?:&|and)\s+[A-Z][a-z]+)?(?:\s+et\s+al\.?)?)\s*\(\d{4}\)/g;
   while ((match = citeRegex.exec(cleanText)) !== null) claims.push({ text: match[0], type: "citation" });
   const statRegex = /(\d+(?:,\d{3})*(?:\.\d+)?)\s+(?:patients|participants|subjects|studies|trials|cases)\s+(?:from|in|per|across)/gi;
   while ((match = statRegex.exec(cleanText)) !== null) claims.push({ text: match[0], type: "statistic" });
   const attrRegex = /(?:according to|per|from|via|source[d]?:)\s+([A-Z][\w\s&]+?)(?:\s+\d{4}|\s*$)/gi;
   while ((match = attrRegex.exec(cleanText)) !== null) claims.push({ text: match[1].trim(), type: "attribution" });
-  const seen = new Set();
-  return claims.filter(c => { if (seen.has(c.text)) return false; seen.add(c.text); return true; });
+  const seen = new Set(); return claims.filter(c => { if (seen.has(c.text)) return false; seen.add(c.text); return true; });
 }
-function cleanClaimForSearch(text: string): string {
-  return text.replace(/\s+/g, " ").replace(/[|*#_`]/g, "").replace(/\s*\([^)]{0,40}\)\s*/g, " ").replace(/\s+/g, " ").trim();
-}
+function cleanClaimForSearch(text: string): string { return text.replace(/\s+/g, " ").replace(/[|*#_`]/g, "").replace(/\s*\([^)]{0,40}\)\s*/g, " ").replace(/\s+/g, " ").trim(); }
 function normalizePriceClaim(text: string): string {
   const drugMatch = text.match(/(lecanemab|Leqembi|aducanumab|Aduhelm|ozempic|wegovy|mounjaro|zepbound)/i);
   const priceMatch = text.match(/\$\d{1,3}(?:,\d{3})+/);
@@ -318,20 +262,13 @@ async function verifyClaim(claim: Claim): Promise<VerificationResult> {
   let searchQuery = cleanClaimForSearch(claim.text);
   if (claim.type === "price") searchQuery = normalizePriceClaim(searchQuery);
   searchQuery = searchQuery.substring(0, 100);
-  const sources: string[] = [];
-  let searchError = false;
-  try {
-    const [wiki, ddg] = await Promise.all([searchWiki(searchQuery), searchDdg(searchQuery)]);
-    if (wiki) sources.push(truncate(wiki, 150) || "");
-    if (ddg) sources.push(truncate(ddg, 150) || "");
-  } catch (e) { searchError = true; }
-  let status: VerificationResult["status"] = "unverified";
-  let note: string | undefined;
+  const sources: string[] = []; let searchError = false;
+  try { const [wiki, ddg] = await Promise.all([searchWiki(searchQuery), searchDdg(searchQuery)]); if (wiki) sources.push(truncate(wiki, 150) || ""); if (ddg) sources.push(truncate(ddg, 150) || ""); } catch (e) { searchError = true; }
+  let status: VerificationResult["status"] = "unverified"; let note: string | undefined;
   if (searchError) { status = "search-failed"; note = "Search APIs returned an error or timed out"; } 
   else if (sources.length === 0) { status = "unverified"; note = "No live sources found"; } 
   else {
-    const combined = sources.join(" ").toLowerCase();
-    const hasNumbers = /\d/.test(claim.text);
+    const combined = sources.join(" ").toLowerCase(); const hasNumbers = /\d/.test(claim.text);
     if (hasNumbers) {
       const claimNumbers = claim.text.match(/\d+(?:\.\d+)?/g) || [];
       const sourceHasAny = claimNumbers.some(n => combined.includes(n));
@@ -343,10 +280,8 @@ async function verifyClaim(claim: Claim): Promise<VerificationResult> {
 }
 function buildVerificationFooter(results: VerificationResult[]): string {
   if (results.length === 0) return "";
-  const verified = results.filter(r => r.status === "verified");
-  const uncertain = results.filter(r => r.status === "uncertain");
-  const unverified = results.filter(r => r.status === "unverified");
-  const contradicted = results.filter(r => r.status === "contradicted");
+  const verified = results.filter(r => r.status === "verified"); const uncertain = results.filter(r => r.status === "uncertain");
+  const unverified = results.filter(r => r.status === "unverified"); const contradicted = results.filter(r => r.status === "contradicted");
   const searchFailed = results.filter(r => r.status === "search-failed");
   let footer = "\n\n---\n";
   if (contradicted.length > 0) footer += `🔴 **${contradicted.length} claim(s) contradicted by live sources**\n`;
@@ -377,10 +312,7 @@ async function analyzeImageWithGemini(base64Image: string, userQuestion: string)
       const model = genAI.getGenerativeModel({ model: modelName });
       const result = await model.generateContent([visionPrompt, { inlineData: { data: base64Image, mimeType: "image/jpeg" } }]);
       return (await result.response).text();
-    } catch (e: any) {
-      lastError = e.message;
-      continue;
-    }
+    } catch (e: any) { lastError = e.message; continue; }
   }
   throw new Error("All vision models failed. Last error: " + lastError);
 }
@@ -397,10 +329,7 @@ export async function POST(req: Request) {
     const lowerPrompt = userPrompt.toLowerCase();
 
     if (mode === "voice" && audioBase64) {
-      try {
-        const transcript = await speechToText(audioBase64);
-        if (transcript) userPrompt = transcript;
-      } catch (e: any) { console.error("STT failed:", e.message); }
+      try { const transcript = await speechToText(audioBase64); if (transcript) userPrompt = transcript; } catch (e: any) { console.error("STT failed:", e.message); }
     }
 
     let convId = conversationId;
@@ -418,30 +347,25 @@ export async function POST(req: Request) {
           try {
             ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ status: "📷 Analyzing what I see..." })}\n\n`));
             analysis = await analyzeImageWithGemini(imageBase64, userPrompt);
-            ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: analysis } }] })}\n\n`));
+            const p1 = { choices: [{ delta: { content: analysis } }] };
+            ctrl.enqueue(enc.encode(`data: ${JSON.stringify(p1)}\n\n`));
           } catch (e: any) {
             analysis = "*(Vision analysis failed: " + e.message + ")*";
-            ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: analysis } }] })}\n\n`));
+            const p2 = { choices: [{ delta: { content: analysis } }] };
+            ctrl.enqueue(enc.encode(`data: ${JSON.stringify(p2)}\n\n`));
           }
           try {
             ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ status: "🔊 Generating voice..." })}\n\n`));
             const audio = await textToSpeech(analysis.replace(/[*#_`]/g, "").substring(0, 500));
             if (audio) ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ audioBase64: audio })}\n\n`));
-          } catch (e: any) {
-            ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ status: "🔇 Voice unavailable" })}\n\n`));
-          }
+          } catch (e: any) { ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ status: "🔇 Voice unavailable" })}\n\n`)); }
           ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ conversationId: convId })}\n\n`));
           ctrl.enqueue(enc.encode("data: [DONE]\n\n"));
           ctrl.close();
-          try {
-            await prisma.message.create({ data: { conversationId: convId, role: "assistant", content: analysis } });
-            await prisma.conversation.update({ where: { id: convId }, data: { updatedAt: new Date() } });
-          } catch (e) { console.error("DB error:", e); }
+          try { await prisma.message.create({ data: { conversationId: convId, role: "assistant", content: analysis } }); await prisma.conversation.update({ where: { id: convId }, data: { updatedAt: new Date() } }); } catch (e) { console.error("DB error:", e); }
         },
       });
-      return new Response(stream, { 
-        headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no" } 
-      });
+      return new Response(stream, { headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no" } });
     }
 
     const isCoding = lowerPrompt.includes("code") || lowerPrompt.includes("algorithm") || lowerPrompt.includes("function") || lowerPrompt.includes("write a") || lowerPrompt.includes("array") || lowerPrompt.includes("tree");
@@ -482,49 +406,43 @@ Your response MUST have exactly 2 sections:
               sendStatus("🔎 Verifying in the real sandbox...");
               const execResult = await executeJs(code);
 
-              if (execResult.unavailable) {
-                full = roundText + `\n\n⚠️ **Could not verify — the execution sandbox is temporarily unavailable.**`;
-                break;
-              }
-              if (execResult.ok) {
-                full = roundText + `\n\n✅ **Code executed without errors** (via ${providerName}, round ${round}/${MAX_ROUNDS}) — output: \`${execResult.stdout || "(no output)"}\`.`;
-                break;
-              }
+              if (execResult.unavailable) { full = roundText + `\n\n⚠️ **Could not verify — the execution sandbox is temporarily unavailable.**`; break; }
+              if (execResult.ok) { full = roundText + `\n\n✅ **Code executed without errors** (via ${providerName}, round ${round}/${MAX_ROUNDS}) — output: \`${execResult.stdout || "(no output)"}\`.`; break; }
 
               full = roundText;
               convoMessages.push({ role: "assistant", content: roundText });
               convoMessages.push({ role: "user", content: `Your code failed when executed. Real error:\n\n${execResult.stderr}\n\nFix it. Follow the exact same format.` });
               if (round === MAX_ROUNDS) full += `\n\n⚠️ **Still failing after ${MAX_ROUNDS} attempts.** Last error: \`${execResult.stderr}\``;
             }
-            
-            // FIX: Extracted to variable to prevent SWC parser syntax errors
             const successPayload = { choices: [{ delta: { content: full } }] };
             ctrl.enqueue(enc.encode(`data: ${JSON.stringify(successPayload)}\n\n`));
-            
           } catch (e: any) {
             console.error("Coding loop error:", e);
-            // FIX: Extracted to variable to prevent SWC parser syntax errors
             const errorPayload = { choices: [{ delta: { content: "*(AI providers unavailable)*" } }] };
             ctrl.enqueue(enc.encode(`data: ${JSON.stringify(errorPayload)}\n\n`));
           } finally {
             ctrl.enqueue(enc.encode("data: [DONE]\n\n"));
             ctrl.close();
-            try {
-              await prisma.message.create({ data: { conversationId: convId, role: "assistant", content: full } });
-              await prisma.conversation.update({ where: { id: convId }, data: { updatedAt: new Date() } });
-            } catch (e) { console.error("DB error:", e); }
+            try { await prisma.message.create({ data: { conversationId: convId, role: "assistant", content: full } }); await prisma.conversation.update({ where: { id: convId }, data: { updatedAt: new Date() } }); } catch (e) { console.error("DB error:", e); }
           }
         },
       });
-      return new Response(stream, { 
-        headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no" } 
-      });
+      return new Response(stream, { headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no" } });
     }
 
     // --- STANDARD CHAT MODE ---
+    // FIX 3: Upgraded System Prompt for Universal Beautiful Formatting
     const SYSTEM = `You are Noctryx AI, built by Lewis Einstein, an AI/ML Engineer at Kibabii University, launched in July 2026.
-If no live search results are available, you MUST explicitly say "I'm not certain" rather than fabricating an answer.
-When solving mathematics problems, follow this exact structure: 1. Restate the Problem, 2. Given Information, 3. What Must Be Found, 4. Formula or Method, 5. Solution — Numbered Steps, 6. Verification, 7. Final Answer.`;
+
+UNIVERSAL FORMATTING RULE (MUST FOLLOW FOR ALL RESPONSES):
+1. NEVER output a "wall of text". Break everything into short paragraphs (2-3 sentences max).
+2. Use Markdown headings (###) to separate different topics or steps.
+3. Use bullet points (-) for lists, features, or sequential steps.
+4. Bold (**text**) key terms, numbers, or final conclusions.
+5. If this is a math or logic problem, strictly follow this 7-step format: 
+   1. Restate the Problem, 2. Given Information, 3. What Must Be Found, 4. Formula or Method, 5. Solution — Numbered Steps, 6. Verification, 7. Final Answer.
+
+If no live search results are available, you MUST explicitly say "I'm not certain" rather than fabricating an answer.`;
 
     const enc = new TextEncoder();
     const stream = new ReadableStream({
@@ -534,9 +452,13 @@ When solving mathematics problems, follow this exact structure: 1. Restate the P
 
         try {
           sendStatus("🔎 Searching live sources...");
-          const [tavily, wiki, ddg, hn, so, gh, arxiv] = await Promise.all([
-            searchTavily(userPrompt), searchWiki(userPrompt), searchDdg(userPrompt), searchHn(userPrompt), searchSo(userPrompt), searchGh(userPrompt), searchArxiv(userPrompt)
-          ]);
+          // FIX 4: Wrapped in try/catch so if ONE search API fails, it doesn't crash the whole request
+          let tavily = null, wiki = null, ddg = null, hn = null, so = null, gh = null, arxiv = null;
+          try {
+            [tavily, wiki, ddg, hn, so, gh, arxiv] = await Promise.all([
+              searchTavily(userPrompt), searchWiki(userPrompt), searchDdg(userPrompt), searchHn(userPrompt), searchSo(userPrompt), searchGh(userPrompt), searchArxiv(userPrompt)
+            ]);
+          } catch (e) { console.error("Search batch failed, continuing without some sources:", e); }
 
           let searchCtx = "";
           if (tavily) searchCtx += `[Tavily] ${truncate(tavily, 400)}\n\n`;
@@ -562,7 +484,6 @@ When solving mathematics problems, follow this exact structure: 1. Restate the P
 
           const words = chatTxt.split(" ");
           for (const word of words) {
-            // FIX: Extracted to variable to prevent SWC parser syntax errors
             const wordPayload = { choices: [{ delta: { content: word + " " } }] };
             ctrl.enqueue(enc.encode(`data: ${JSON.stringify(wordPayload)}\n\n`));
           }
@@ -621,9 +542,7 @@ When solving mathematics problems, follow this exact structure: 1. Restate the P
       },
     });
 
-    return new Response(stream, { 
-      headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no" } 
-    });
+    return new Response(stream, { headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no" } });
   } catch (error: any) {
     console.error("API Error:", error);
     return new Response(JSON.stringify({ error: "Internal Server Error", details: error.message }), { status: 500 });
