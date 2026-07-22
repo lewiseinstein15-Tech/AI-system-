@@ -204,7 +204,6 @@ function extractCode(text: string): string | null {
   return g ? g[1].trim() : null;
 }
 
-// --- SEARCH FUNCTIONS (Unchanged for brevity, they work perfectly) ---
 async function searchWiki(q: string) {
   try {
     const s = await fetchTimeout(`https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(q)}&format=json&origin=*`);
@@ -278,7 +277,6 @@ async function searchTavily(q: string) {
   return null;
 }
 
-// --- CLAIM VERIFICATION (Unchanged, works perfectly) ---
 interface Claim { text: string; type: "price" | "percentage" | "citation" | "statistic" | "attribution"; }
 function stripMarkdown(text: string): string {
   return text.replace(/\|/g, " ").replace(/[*#_`]/g, "").replace(/\n/g, " ").replace(/\s+/g, " ").trim();
@@ -441,7 +439,6 @@ export async function POST(req: Request) {
           } catch (e) { console.error("DB error:", e); }
         },
       });
-      // FIX: Added Connection and X-Accel-Buffering headers to prevent Vercel from buffering status updates
       return new Response(stream, { 
         headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no" } 
       });
@@ -499,10 +496,16 @@ Your response MUST have exactly 2 sections:
               convoMessages.push({ role: "user", content: `Your code failed when executed. Real error:\n\n${execResult.stderr}\n\nFix it. Follow the exact same format.` });
               if (round === MAX_ROUNDS) full += `\n\n⚠️ **Still failing after ${MAX_ROUNDS} attempts.** Last error: \`${execResult.stderr}\``;
             }
-            ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: full } }] })}\n\n`));
+            
+            // FIX: Extracted to variable to prevent SWC parser syntax errors
+            const successPayload = { choices: [{ delta: { content: full } }] };
+            ctrl.enqueue(enc.encode(`data: ${JSON.stringify(successPayload)}\n\n`));
+            
           } catch (e: any) {
             console.error("Coding loop error:", e);
-            ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: "*(AI providers unavailable)*" }] })}\n\n`));
+            // FIX: Extracted to variable to prevent SWC parser syntax errors
+            const errorPayload = { choices: [{ delta: { content: "*(AI providers unavailable)*" } }] };
+            ctrl.enqueue(enc.encode(`data: ${JSON.stringify(errorPayload)}\n\n`));
           } finally {
             ctrl.enqueue(enc.encode("data: [DONE]\n\n"));
             ctrl.close();
@@ -559,12 +562,15 @@ When solving mathematics problems, follow this exact structure: 1. Restate the P
 
           const words = chatTxt.split(" ");
           for (const word of words) {
-            ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: word + " " } }] })}\n\n`));
+            // FIX: Extracted to variable to prevent SWC parser syntax errors
+            const wordPayload = { choices: [{ delta: { content: word + " " } }] };
+            ctrl.enqueue(enc.encode(`data: ${JSON.stringify(wordPayload)}\n\n`));
           }
         } catch (e: any) {
           console.error("Chat error:", e);
           chatTxt = "*(AI response unavailable. Please try again.)*";
-          ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: chatTxt } }] })}\n\n`));
+          const fallbackPayload = { choices: [{ delta: { content: chatTxt } }] };
+          ctrl.enqueue(enc.encode(`data: ${JSON.stringify(fallbackPayload)}\n\n`));
         }
 
         try {
@@ -576,7 +582,8 @@ When solving mathematics problems, follow this exact structure: 1. Restate the P
             const results = await Promise.all(claims.slice(0, 5).map(c => verifyClaim(c)));
             const verificationFooter = buildVerificationFooter(results);
             if (verificationFooter) {
-              ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: verificationFooter } }] })}\n\n`));
+              const footerPayload = { choices: [{ delta: { content: verificationFooter } }] };
+              ctrl.enqueue(enc.encode(`data: ${JSON.stringify(footerPayload)}\n\n`));
               chatTxt += verificationFooter;
             }
           }
@@ -586,7 +593,10 @@ When solving mathematics problems, follow this exact structure: 1. Restate the P
           try {
             sendStatus("🔊 Generating voice response...");
             const audioBase64Out = await textToSpeech(chatTxt.replace(/[*#_`]/g, "").substring(0, 1000));
-            if (audioBase64Out) ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ audioBase64: audioBase64Out })}\n\n`));
+            if (audioBase64Out) {
+              const audioPayload = { audioBase64: audioBase64Out };
+              ctrl.enqueue(enc.encode(`data: ${JSON.stringify(audioPayload)}\n\n`));
+            }
           } catch (e: any) { console.error("TTS failed:", e.message); }
         }
 
