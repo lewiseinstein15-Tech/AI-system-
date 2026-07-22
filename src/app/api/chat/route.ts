@@ -861,7 +861,7 @@ Additional constraints:
 
           const words = chatTxt.split(" ");
           for (const word of words) {
-            ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: word + " " }] })}\n\n`));
+            ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: word + " " } }] })}\n\n`));
           }
         } catch (e: any) {
           console.error("Chat error:", e);
