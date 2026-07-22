@@ -158,7 +158,10 @@ async function speechToText(audioBase64: string): Promise<string> {
 }
 
 async function textToSpeech(text: string): Promise<string> {
-  if (!process.env.OPENAI_API_KEY) return "";
+  if (!process.env.OPENAI_API_KEY) {
+    console.error("TTS skipped: OPENAI_API_KEY not set");
+    throw new Error("OPENAI_API_KEY not configured — speech output unavailable");
+  }
 
   const res = await fetch("https://api.openai.com/v1/audio/speech", {
     method: "POST",
@@ -579,11 +582,14 @@ export async function POST(req: Request) {
       data: { conversationId: convId, role: "user", content: userPrompt },
     });
 
+    // LIVE MODE — Image Analysis with Vision + TTS
     if (mode === "live" && imageBase64) {
       const enc = new TextEncoder();
       const stream = new ReadableStream({
         async start(ctrl) {
           let analysis = "";
+
+          // Step 1: Vision analysis
           try {
             ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ status: "📷 Analyzing what I see..." })}\n\n`));
             analysis = await analyzeImageWithGemini(imageBase64, userPrompt);
@@ -593,18 +599,24 @@ export async function POST(req: Request) {
             ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: analysis } }] })}\n\n`));
           }
 
+          // Step 2: Text-to-Speech — ALWAYS try for live mode
           try {
+            ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ status: "🔊 Generating voice..." })}\n\n`));
             const audio = await textToSpeech(analysis.replace(/[*#_`]/g, "").substring(0, 500));
             if (audio) {
               ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ audioBase64: audio })}\n\n`));
             }
           } catch (e: any) {
             console.error("Live TTS failed:", e.message);
+            ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ status: "🔇 Voice unavailable" })}\n\n`));
           }
 
+          // Step 3: Conversation ID + done
           ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ conversationId: convId })}\n\n`));
           ctrl.enqueue(enc.encode("data: [DONE]\n\n"));
           ctrl.close();
+
+          // Persist to DB
           try {
             await prisma.message.create({ data: { conversationId: convId, role: "assistant", content: analysis } });
             await prisma.conversation.update({ where: { id: convId }, data: { updatedAt: new Date() } });
@@ -849,7 +861,7 @@ Additional constraints:
 
           const words = chatTxt.split(" ");
           for (const word of words) {
-            ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: word + " " } }] })}\n\n`));
+            ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: word + " " }] })}\n\n`));
           }
         } catch (e: any) {
           console.error("Chat error:", e);
