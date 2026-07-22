@@ -34,7 +34,8 @@
     "react-syntax-highlighter": "^15.5.0",
     "remark-gfm": "^4.0.0",
     "tailwind-merge": "^2.2.0",
-    "zod": "^3.22.0"
+    "zod": "^3.22.0",
+    "playwright": "^1.48.0"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
