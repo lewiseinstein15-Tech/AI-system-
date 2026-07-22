@@ -6,11 +6,15 @@ import { streamText } from "ai";
 import { Sandbox } from "@vercel/sandbox";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 
+// CRITICAL: Forces Next.js to use Node.js runtime, preventing Webpack build 
+// failures with Buffer, Blob, FormData, and @vercel/sandbox.
+export const runtime = "nodejs";
+
 const PROVIDERS = [
   { name: "Cerebras", baseURL: "https://api.cerebras.ai/v1", key: "CEREBRAS_API_KEY", model: process.env.CEREBRAS_MODEL_ID || "gpt-oss-120b" },
   { name: "Groq", baseURL: "https://api.groq.com/openai/v1", key: "GROQ_API_KEY", model: process.env.GROQ_MODEL_ID || "openai/gpt-oss-20b" },
   { name: "OpenRouter", baseURL: "https://openrouter.ai/api/v1", key: "OPENROUTER_API_KEY", model: process.env.OPENROUTER_MODEL_ID || "deepseek/deepseek-chat-v3:free" },
-  { name: "Gemini", baseURL: "https://generativelanguage.googleapis.com/v1beta/openai", key: "GEMINI_API_KEY", model: process.env.GEMINI_MODEL_ID || "gemini-3.5-flash" },
+  { name: "Gemini", baseURL: "https://generativelanguage.googleapis.com/v1beta/openai", key: "GEMINI_API_KEY", model: process.env.GEMINI_MODEL_ID || "gemini-1.5-flash" },
 ];
 
 async function callSingleAI(messages: any[], temp: number, maxTokens: number) {
@@ -43,29 +47,33 @@ async function callAllAI(messages: any[], temp: number, maxTokens: number, timeo
     const apiKey = process.env[p.key];
     if (!apiKey) return null;
 
-    const providerTimeout = new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error("Provider timeout")), timeoutMs)
-    );
-
-    try {
+    // Wrap the ENTIRE async operation (initialization + stream consumption) 
+    // so the timeout actually applies to the full generation process.
+    const operation = (async () => {
       const client = createOpenAI({ baseURL: p.baseURL, apiKey });
-      const result = await Promise.race([
-        streamText({
-          model: client(p.model),
-          messages,
-          temperature: temp,
-          maxTokens,
-          maxRetries: 0,
-        }),
-        providerTimeout,
-      ]);
+      const result = await streamText({
+        model: client(p.model),
+        messages,
+        temperature: temp,
+        maxTokens,
+        maxRetries: 0,
+      });
 
       let text = "";
       for await (const d of result.textStream) {
         text += d;
       }
-      console.log("Ensemble response from:", p.name);
       return { text, provider: p.name };
+    })();
+
+    const providerTimeout = new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error("Provider timeout")), timeoutMs)
+    );
+
+    try {
+      const resolved = await Promise.race([operation, providerTimeout]);
+      console.log("Ensemble response from:", p.name);
+      return resolved;
     } catch (err: any) {
       console.error(p.name, "ensemble failed:", err?.message || err);
       return null;
@@ -507,9 +515,9 @@ async function analyzeImageWithGemini(base64Image: string, userQuestion: string)
 
   const modelNames = [
     process.env.GEMINI_MODEL_ID,
-    "gemini-3.5-flash",
-    "gemini-3.1-flash-lite",
-    "gemini-2.5-flash",
+    "gemini-1.5-flash",
+    "gemini-1.5-flash-lite",
+    "gemini-2.0-flash-exp",
   ].filter(Boolean) as string[];
 
   const visionPrompt = `You are Noctryx AI with live camera vision. The user has shared a photo from their camera and asked a question about what you see.
@@ -549,7 +557,7 @@ Describe what you see accurately and CONCISELY — 2-3 sentences maximum, since 
 export async function POST(req: Request) {
   try {
     const session = await getServerSession(authOptions);
-    if (!session) return new Response(JSON.stringify({ error: "Unauthorized" }), { status: 401 });
+    if (!session?.user) return new Response(JSON.stringify({ error: "Unauthorized" }), { status: 401 });
 
     const body = await req.json();
     const { messages, conversationId, autoVerify = false, imageBase64, mode, audioBase64, enableTTS = false } = body;
@@ -898,13 +906,13 @@ Additional constraints:
           console.error("Verification error:", e);
         }
 
-        let audioBase64 = "";
+        let audioBase64Out = "";
         if ((mode === "voice" || enableTTS) && chatTxt) {
           try {
             sendStatus("🔊 Generating voice response...");
-            audioBase64 = await textToSpeech(chatTxt.replace(/[*#_`]/g, "").substring(0, 1000));
-            if (audioBase64) {
-              ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ audioBase64 })}\n\n`));
+            audioBase64Out = await textToSpeech(chatTxt.replace(/[*#_`]/g, "").substring(0, 1000));
+            if (audioBase64Out) {
+              ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ audioBase64: audioBase64Out })}\n\n`));
             }
           } catch (e: any) {
             console.error("TTS failed:", e.message);
