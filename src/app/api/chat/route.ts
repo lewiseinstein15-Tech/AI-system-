@@ -8,7 +8,7 @@ import { GoogleGenerativeAI } from "@google/generative-ai";
 
 export const runtime = "nodejs";
 
-// === YOUR ORIGINAL PROVIDERS (keep as is) ===
+// Your original PROVIDERS
 const PROVIDERS = [
   { name: "Qwen", baseURL: "https://dashscope.aliyuncs.com/compatible-mode/v1", key: "QWEN_API_KEY", model: process.env.QWEN_MODEL_ID || "qwen-plus" },
   { name: "Groq", baseURL: "https://api.groq.com/openai/v1", key: "GROQ_API_KEY", model: process.env.GROQ_MODEL_ID || process.env.GROQ_MODEL || "openai/gpt-oss-120b" },
@@ -17,7 +17,7 @@ const PROVIDERS = [
   { name: "Gemini", baseURL: "https://generativelanguage.googleapis.com/v1beta/openai", key: "GEMINI_API_KEY", model: process.env.GEMINI_MODEL_ID || "gemini-3.5-flash" },
 ];
 
-// === NEW: FAST WEB LINK OPENER ===
+// Fast Web Link Opener
 async function fetchWebpage(url: string): Promise<string> {
   try {
     const { chromium } = await import("playwright");
@@ -51,13 +51,13 @@ export async function POST(req: Request) {
     let userPrompt = messages[messages.length - 1].content || "";
     const lowerPrompt = userPrompt.toLowerCase().trim();
 
-    // INSTANT SMALL TALK (very fast)
+    // Fast Small Talk
     if (userPrompt.length <= 60 && SMALL_TALK_RE.test(lowerPrompt)) {
       const casualResponse = "Hey! How can I help you today? 😊";
       return new Response(JSON.stringify({ choices: [{ delta: { content: casualResponse } }] }), { status: 200 });
     }
 
-    // URL DETECTION + BROWSER
+    // Link Opening
     const urlRegex = /(https?:\/\/[^\s]+)/g;
     const urls = userPrompt.match(urlRegex) || [];
     let linkContext = "";
@@ -68,15 +68,15 @@ export async function POST(req: Request) {
       }
     }
 
-    // TODO: Paste the rest of your original main logic here (search, AI ensemble, synthesis, streaming, DB, etc.)
-    // For now, this is the skeleton with link opening working.
+    // Basic Response for now
+    const responseText = linkContext 
+      ? `I opened the link(s) for you:\n${linkContext}` 
+      : "I'm here! Send me a question or a link to open.";
 
-    const responseText = linkContext ? "I opened the link(s):\n" + linkContext : "I'm ready! Send me a question or link.";
-    
     return new Response(JSON.stringify({ choices: [{ delta: { content: responseText } }] }), { status: 200 });
 
   } catch (error: any) {
     console.error("API Error:", error);
-    return new Response(JSON.stringify({ error: "Internal Server Error" }), { status: 500 });
+    return new Response(JSON.stringify({ error: "Internal Server Error", details: error.message }), { status: 500 });
   }
 }
