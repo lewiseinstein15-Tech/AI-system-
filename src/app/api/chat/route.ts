@@ -8,324 +8,41 @@ import { GoogleGenerativeAI } from "@google/generative-ai";
 
 export const runtime = "nodejs";
 
-// NOTE: Model defaults below were updated because the old defaults
-// (llama3-70b-8192, llama3.1-8b, gemini-1.5-flash) are confirmed dead/deprecated
-// by the providers themselves as of mid-2026. Verify these periodically —
-// providers deprecate fast. Groq now reads GROQ_MODEL_ID OR GROQ_MODEL since
-// your Vercel project has the var named GROQ_MODEL (not GROQ_MODEL_ID).
-const PROVIDERS = [
-  { name: "Qwen", baseURL: "https://dashscope.aliyuncs.com/compatible-mode/v1", key: "QWEN_API_KEY", model: process.env.QWEN_MODEL_ID || "qwen-plus" },
-  { name: "Groq", baseURL: "https://api.groq.com/openai/v1", key: "GROQ_API_KEY", model: process.env.GROQ_MODEL_ID || process.env.GROQ_MODEL || "openai/gpt-oss-120b" },
-  { name: "Cerebras", baseURL: "https://api.cerebras.ai/v1", key: "CEREBRAS_API_KEY", model: process.env.CEREBRAS_MODEL_ID || "gpt-oss-120b" },
-  // OpenRouter's plain "deepseek/deepseek-chat:free" no longer exists (July 2026) —
-  // using their auto-router instead, which always points at whatever free model
-  // is currently live, so this stops silently 404ing when free IDs rotate.
-  { name: "OpenRouter", baseURL: "https://openrouter.ai/api/v1", key: "OPENROUTER_API_KEY", model: process.env.OPENROUTER_MODEL_ID || "openrouter/free" },
-  { name: "Gemini", baseURL: "https://generativelanguage.googleapis.com/v1beta/openai", key: "GEMINI_API_KEY", model: process.env.GEMINI_MODEL_ID || "gemini-3.5-flash" },
-];
+const PROVIDERS = [ /* your existing PROVIDERS array - keep unchanged */ ];
+
+async function fetchWebpage(url: string): Promise<string> {
+  try {
+    const { chromium } = await import("playwright");
+    const browser = await chromium.launch({ headless: true });
+    const context = await browser.newContext({ userAgent: "Mozilla/5.0" });
+    const page = await context.newPage();
+
+    await page.goto(url, { waitUntil: "networkidle", timeout: 30000 });
+
+    if (url.includes("x.com") || url.includes("twitter.com")) {
+      await page.evaluate("window.scrollTo(0, document.body.scrollHeight)");
+      await new Promise(r => setTimeout(r, 1500));
+    }
+
+    const title = await page.title();
+    const content = await page.inner_text("body");
+
+    await browser.close();
+    return `Title: ${title}\nURL: \( {url}\n\nContent:\n \){content.slice(0, 12000)}`;
+  } catch (err: any) {
+    return `Could not open link ${url}: ${err.message}`;
+  }
+}
 
 async function callSingleAI(messages: any[], temp: number, maxTokens: number) {
-  const errors: string[] = [];
-  for (const p of PROVIDERS) {
-    const apiKey = process.env[p.key];
-    if (!apiKey) { errors.push(`${p.name}: no API key set`); continue; }
-    try {
-      const client = createOpenAI({ baseURL: p.baseURL, apiKey });
-      const result = await streamText({
-        model: client(p.model),
-        messages,
-        temperature: temp,
-        maxTokens,
-        maxRetries: 0,
-      });
-      console.log("Provider used:", p.name, p.model);
-      return { result, providerName: p.name };
-    } catch (err: any) {
-      const msg = err?.message || String(err);
-      console.error(p.name, "failed:", msg);
-      errors.push(`${p.name} (${p.model}): ${msg}`);
-      continue;
-    }
-  }
-  // Surface every provider's failure reason instead of only the last one —
-  // this is what actually tells you "all 5 models are 404" vs "auth failed" etc.
-  throw new Error("All providers unavailable:\n" + errors.join("\n"));
+  // ... keep your existing function
 }
 
-async function callAllAI(messages: any[], temp: number, maxTokens: number, timeoutMs = 30000): Promise<{ responses: string[]; providers: string[] }> {
-  const failureLog: string[] = [];
-
-  const providerPromises = PROVIDERS.map(async (p) => {
-    const apiKey = process.env[p.key];
-    if (!apiKey) { failureLog.push(`${p.name}: no API key set`); return null; }
-
-    const operation = (async () => {
-      try {
-        const client = createOpenAI({ baseURL: p.baseURL, apiKey });
-        const result = await streamText({
-          model: client(p.model),
-          messages,
-          temperature: temp,
-          maxTokens,
-          maxRetries: 0,
-        });
-
-        let text = "";
-        for await (const d of result.textStream) {
-          text += d;
-        }
-        return { text, provider: p.name };
-      } catch (streamErr: any) {
-        throw streamErr;
-      }
-    })();
-
-    const providerTimeout = new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error(`${p.name} timeout`)), timeoutMs)
-    );
-
-    try {
-      return await Promise.race([operation, providerTimeout]);
-    } catch (err: any) {
-      failureLog.push(`${p.name} (${p.model}): ${err?.message || err}`);
-      return null;
-    }
-  });
-
-  const results = await Promise.all(providerPromises);
-  const valid = results.filter((r): r is { text: string; provider: string } => r !== null && r.text.length > 10);
-
-  if (valid.length === 0) {
-    console.error("Ensemble failure detail:", failureLog.join(" | "));
-    throw new Error("All providers unavailable in ensemble:\n" + failureLog.join("\n"));
-  }
-
-  return {
-    responses: valid.map((r) => r.text),
-    providers: valid.map((r) => r.provider),
-  };
+async function callAllAI(messages: any[], temp: number, maxTokens: number, timeoutMs = 30000) {
+  // ... keep your existing function
 }
 
-async function synthesizeResponses(responses: string[], userQuery: string, searchCtx: string): Promise<string> {
-  if (responses.length === 0) throw new Error("No responses to synthesize");
-  if (responses.length === 1) return responses[0];
-
-  const gemini = PROVIDERS.find((p) => p.name === "Gemini");
-  if (!gemini || !process.env.GEMINI_API_KEY) {
-    return responses.reduce((a, b) => (a.length > b.length ? a : b));
-  }
-
-  const synthesisPrompt = `You are Noctryx AI. Synthesize these AI responses into ONE highly organized, accurate response.
-
-⚠️ CRITICAL FORMATTING RULES - YOU MUST FOLLOW THESE EXACTLY:
-
-1. HEADINGS: Every section title MUST start with ### (three hash symbols and a space)
-2. BULLET POINTS: Every list item MUST start with - (dash and space)
-3. BOLD TEXT: All key terms MUST be wrapped in **double asterisks**
-4. PARAGRAPHS: Maximum 2-3 sentences per paragraph.
-
-EXAMPLE OF CORRECT FORMATTING:
-### Section Title
-Short paragraph here.
-
-- **Bold Term**: Explanation here.
-- **Another Term**: Explanation here.
-
----
-
-${searchCtx ? `SEARCH CONTEXT:\n${searchCtx}\n\n` : ""}USER QUESTION: ${userQuery}
-
-RESPONSES TO SYNTHESIZE:
-${responses.map((r, i) => `--- RESPONSE ${i + 1} ---\n${r}`).join("\n\n")}
-
-Now write the final unified response following the EXACT formatting rules shown above:`;
-
-  try {
-    const client = createOpenAI({ baseURL: gemini.baseURL, apiKey: process.env.GEMINI_API_KEY! });
-    const result = await streamText({
-      model: client(gemini.model),
-      messages: [{ role: "user", content: synthesisPrompt }],
-      temperature: 0.3,
-      maxTokens: 2000,
-      maxRetries: 0,
-    });
-    let text = "";
-    for await (const d of result.textStream) text += d;
-    return text;
-  } catch (e: any) {
-    console.error("Synthesis failed:", e?.message || e);
-    return responses.reduce((a, b) => (a.length > b.length ? a : b));
-  }
-}
-
-async function speechToText(audioBase64: string): Promise<string> {
-  const groqKey = process.env.GROQ_API_KEY;
-  if (!groqKey) throw new Error("GROQ_API_KEY required");
-  const audioBuffer = Buffer.from(audioBase64, "base64");
-  const formData = new FormData();
-  formData.append("file", new Blob([audioBuffer], { type: "audio/webm" }), "audio.webm");
-  formData.append("model", "whisper-large-v3");
-  formData.append("response_format", "json");
-
-  const res = await fetch("https://api.groq.com/openai/v1/audio/transcriptions", {
-    method: "POST",
-    headers: { Authorization: `Bearer ${groqKey}` },
-    body: formData,
-  });
-  if (!res.ok) throw new Error(`STT failed: ${await res.text()}`);
-  const data = await res.json();
-  return data.text || "";
-}
-
-async function textToSpeech(text: string): Promise<string> {
-  if (!process.env.OPENAI_API_KEY) throw new Error("OPENAI_API_KEY not configured");
-  const res = await fetch("https://api.openai.com/v1/audio/speech", {
-    method: "POST",
-    headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ model: "tts-1", voice: "alloy", input: text.replace(/[*#_`]/g, "").substring(0, 1000), response_format: "mp3" }),
-  });
-  if (!res.ok) throw new Error(`TTS failed: ${await res.text()}`);
-  return Buffer.from(await res.arrayBuffer()).toString("base64");
-}
-
-function truncate(str: string | null, max: number) {
-  if (!str) return null;
-  return str.length > max ? str.substring(0, max) + "..." : str;
-}
-
-async function fetchTimeout(url: string, opts: any = {}, ms = 3000) {
-  const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), ms);
-  try { return await fetch(url, { ...opts, signal: ctrl.signal }); } finally { clearTimeout(t); }
-}
-
-async function executeJs(code: string): Promise<{ ok: boolean; stdout: string; stderr: string; unavailable?: boolean }> {
-  if (!process.env.VERCEL_TOKEN) {
-    // VERCEL_TOKEN was not present in your env var list — without it Sandbox.create
-    // will always fail. Add it in Vercel > Settings > Environment Variables.
-    return { ok: false, stdout: "", stderr: "Sandbox error: VERCEL_TOKEN is not configured", unavailable: true };
-  }
-  let sandbox;
-  try {
-    sandbox = await Sandbox.create({ token: process.env.VERCEL_TOKEN, teamId: process.env.VERCEL_TEAM_ID, projectId: process.env.VERCEL_PROJECT_ID, timeout: 15000, runtime: "node22" });
-    await sandbox.writeFiles([{ path: "main.js", content: Buffer.from(code) }]);
-    const result = await sandbox.runCommand({ cmd: "node", args: ["main.js"] });
-    return { ok: result.exitCode === 0, stdout: (await result.stdout()).trim(), stderr: (await result.stderr()).trim() };
-  } catch (e: any) {
-    return { ok: false, stdout: "", stderr: `Sandbox error: ${e.message}`, unavailable: true };
-  } finally { if (sandbox) { try { await sandbox.stop(); } catch {} } }
-}
-
-function extractCode(text: string): string | null {
-  const m = text.match(/```(?:javascript|js)\s*([\s\S]*?)```/);
-  if (m) return m[1].trim();
-  const g = text.match(/```\s*([\s\S]*?)```/);
-  return g ? g[1].trim() : null;
-}
-
-async function searchWiki(q: string) { try { const s = await fetchTimeout(`https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(q)}&format=json&origin=*`); const d = await s.json(); if (d.query?.search?.[0]) { const sum = await fetchTimeout(`https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(d.query.search[0].title)}`); const sd = await sum.json(); if (sd.extract) return `Wikipedia: ${sd.extract}`; } } catch {} return null; }
-async function searchDdg(q: string) { try { const r = await fetchTimeout(`https://api.duckduckgo.com/?q=${encodeURIComponent(q)}&format=json&no_html=1&skip_disambig=1`, { headers: { Accept: "application/json", "User-Agent": "NoctryxBot/1.0" } }); const d = await r.json(); if (d.AbstractText) return `DuckDuckGo: ${d.AbstractText}`; if (d.RelatedTopics?.[0]?.Text) return `DuckDuckGo: ${d.RelatedTopics[0].Text}`; } catch {} return null; }
-async function searchHn(q: string) { try { const r = await fetchTimeout(`https://hn.algolia.com/api/v1/search?query=${encodeURIComponent(q)}&tags=story&hitsPerPage=2`); const d = await r.json(); if (d.hits?.length) return `Hacker News: ${d.hits.map((h: any) => h.title).join(" | ")}`; } catch {} return null; }
-async function searchSo(q: string) { try { const r = await fetchTimeout(`https://api.stackexchange.com/2.3/search/advanced?order=desc&sort=relevance&q=${encodeURIComponent(q)}&site=stackoverflow&pagesize=2`); const d = await r.json(); if (d.items?.length) return `StackOverflow: ${d.items.map((i: any) => i.title).join(" | ")}`; } catch {} return null; }
-async function searchGh(q: string) { try { const h: Record<string, string> = { Accept: "application/vnd.github.v3+json" }; if (process.env.GITHUB_TOKEN) h.Authorization = `token ${process.env.GITHUB_TOKEN}`; const r = await fetchTimeout(`https://api.github.com/search/repositories?q=${encodeURIComponent(q)}&sort=stars&order=desc&per_page=2`, { headers: h }); const d = await r.json(); if (d.items?.length) return `GitHub: ${d.items.map((i: any) => i.full_name).join(" | ")}`; } catch {} return null; }
-async function searchArxiv(q: string) { try { const r = await fetchTimeout(`https://export.arxiv.org/api/query?search_query=all:${encodeURIComponent(q)}&max_results=2`); const t = await r.text(); const titles = [...t.matchAll(/<title>(.*?)<\/title>/g)].map((m) => m[1]).filter((t) => t !== "arXiv Query Result"); if (titles.length) return `arXiv Papers: ${titles.join(" | ")}`; } catch {} return null; }
-async function searchTavily(q: string) {
-  if (!process.env.TAVILY_API_KEY) return null;
-  try {
-    const r = await fetchTimeout("https://api.tavily.com/search", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ api_key: process.env.TAVILY_API_KEY, query: q, max_results: 2, include_answer: true }) }, 5000);
-    const d = await r.json();
-    let out = "";
-    if (d.answer) out += `Summary: ${d.answer}\n`;
-    if (d.results?.length) out += d.results.map((res: any) => `- ${res.title} (${res.url}): ${truncate(res.content, 150)}`).join("\n");
-    return out ? `Tavily Web Search: ${out}` : null;
-  } catch {}
-  return null;
-}
-
-interface Claim { text: string; type: "price" | "percentage" | "citation" | "statistic" | "attribution"; }
-function stripMarkdown(text: string): string { return text.replace(/\|/g, " ").replace(/[*#_`]/g, "").replace(/\n/g, " ").replace(/\s+/g, " ").trim(); }
-function extractClaims(text: string): Claim[] {
-  const claims: Claim[] = []; const cleanText = stripMarkdown(text);
-  const priceRegex = /\$\d{1,3}(?:,\d{3})+(?:\.\d+)?(?:\s*(?:million|billion|yr|year|per year|\/yr))?/gi; let match;
-  while ((match = priceRegex.exec(cleanText)) !== null) { const context = cleanText.substring(Math.max(0, match.index - 40), Math.min(cleanText.length, match.index + 40)); claims.push({ text: `${match[0]} (${context.trim()})`, type: "price" }); }
-  const pctRegex = /\d{1,3}(?:\.\d+)?%/g;
-  while ((match = pctRegex.exec(cleanText)) !== null) { const context = cleanText.substring(Math.max(0, match.index - 30), Math.min(cleanText.length, match.index + 30)); if (/from|per|in|of|rate|probability|chance/i.test(context)) claims.push({ text: `${match[0]} (${context.trim()})`, type: "percentage" }); }
-  const citeRegex = /([A-Z][a-z]+(?:\s+(?:&|and)\s+[A-Z][a-z]+)?(?:\s+et\s+al\.?)?)\s*\(\d{4}\)/g;
-  while ((match = citeRegex.exec(cleanText)) !== null) claims.push({ text: match[0], type: "citation" });
-  const statRegex = /(\d+(?:,\d{3})*(?:\.\d+)?)\s+(?:patients|participants|subjects|studies|trials|cases)\s+(?:from|in|per|across)/gi;
-  while ((match = statRegex.exec(cleanText)) !== null) claims.push({ text: match[0], type: "statistic" });
-  const attrRegex = /(?:according to|per|from|via|source[d]?:)\s+([A-Z][\w\s&]+?)(?:\s+\d{4}|\s*$)/gi;
-  while ((match = attrRegex.exec(cleanText)) !== null) claims.push({ text: match[1].trim(), type: "attribution" });
-  const seen = new Set(); return claims.filter(c => { if (seen.has(c.text)) return false; seen.add(c.text); return true; });
-}
-function cleanClaimForSearch(text: string): string { return text.replace(/\s+/g, " ").replace(/[|*#_`]/g, "").replace(/\s*\([^)]{0,40}\)\s*/g, " ").replace(/\s+/g, " ").trim(); }
-function normalizePriceClaim(text: string): string {
-  const drugMatch = text.match(/(lecanemab|Leqembi|aducanumab|Aduhelm|ozempic|wegovy|mounjaro|zepbound)/i);
-  const priceMatch = text.match(/\$\d{1,3}(?:,\d{3})+/);
-  if (drugMatch && priceMatch) return `${drugMatch[1]} ${priceMatch[0]} price per year`;
-  return text;
-}
-interface VerificationResult { claim: string; type: string; status: "verified" | "unverified" | "contradicted" | "uncertain" | "search-failed"; sources: string[]; note?: string; }
-async function verifyClaim(claim: Claim): Promise<VerificationResult> {
-  let searchQuery = cleanClaimForSearch(claim.text);
-  if (claim.type === "price") searchQuery = normalizePriceClaim(searchQuery);
-  searchQuery = searchQuery.substring(0, 100);
-  const sources: string[] = []; let searchError = false;
-  try { const [wiki, ddg] = await Promise.all([searchWiki(searchQuery), searchDdg(searchQuery)]); if (wiki) sources.push(truncate(wiki, 150) || ""); if (ddg) sources.push(truncate(ddg, 150) || ""); } catch (e) { searchError = true; }
-  let status: VerificationResult["status"] = "unverified"; let note: string | undefined;
-  if (searchError) { status = "search-failed"; note = "Search APIs returned an error or timed out"; } 
-  else if (sources.length === 0) { status = "unverified"; note = "No live sources found"; } 
-  else {
-    const combined = sources.join(" ").toLowerCase(); const hasNumbers = /\d/.test(claim.text);
-    if (hasNumbers) {
-      const claimNumbers = claim.text.match(/\d+(?:\.\d+)?/g) || [];
-      const sourceHasAny = claimNumbers.some(n => combined.includes(n));
-      if (!sourceHasAny && sources.length > 0) { status = "uncertain"; note = "Source found but could not confirm specific numbers"; } 
-      else { status = "verified"; }
-    } else { status = "verified"; }
-  }
-  return { claim: claim.text, type: claim.type, status, sources: sources.filter(Boolean), note };
-}
-function buildVerificationFooter(results: VerificationResult[]): string {
-  if (results.length === 0) return "";
-  const verified = results.filter(r => r.status === "verified"); const uncertain = results.filter(r => r.status === "uncertain");
-  const unverified = results.filter(r => r.status === "unverified"); const contradicted = results.filter(r => r.status === "contradicted");
-  const searchFailed = results.filter(r => r.status === "search-failed");
-  let footer = "\n\n---\n";
-  if (contradicted.length > 0) footer += `🔴 **${contradicted.length} claim(s) contradicted by live sources**\n`;
-  else if (searchFailed.length > 0) footer += `⚠️ **${searchFailed.length} claim(s) could not be checked** — search APIs failed\n`;
-  else if (unverified.length > 0) footer += `🟡 **${unverified.length} claim(s) unverified** — no live sources found\n`;
-  else if (uncertain.length > 0) footer += ` **${uncertain.length} claim(s) uncertain** — sources found but numbers unconfirmed\n`;
-  else footer += `🟢 **All ${verified.length} verifiable claim(s) matched live sources**\n`;
-  footer += "\n<details>\n<summary>Verification details</summary>\n\n";
-  for (const r of results) {
-    const icon = r.status === "verified" ? "🟢" : r.status === "contradicted" ? "" : r.status === "search-failed" ? "⚠️" : "🟡";
-    footer += `${icon} **${r.type.toUpperCase()}**: "${truncate(r.claim, 80)}"\n`;
-    if (r.sources.length > 0) footer += `   Sources: ${r.sources.join(" | ")}\n`;
-    if (r.note) footer += `   Note: ${r.note}\n`;
-    footer += "\n";
-  }
-  footer += "</details>\n*Verified at " + new Date().toISOString() + " against live sources.*";
-  return footer;
-}
-
-async function analyzeImageWithGemini(base64Image: string, userQuestion: string): Promise<string> {
-  if (!process.env.GEMINI_API_KEY) throw new Error("Gemini API key required");
-  const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-  // Fallback list updated: gemini-1.5-flash / gemini-1.5-flash-lite are confirmed
-  // shut down (all requests 404). Using currently-live models instead.
-  const modelNames = [process.env.GEMINI_MODEL_ID, "gemini-3.5-flash", "gemini-2.5-flash", "gemini-2.5-flash-lite"].filter(Boolean) as string[];
-  const visionPrompt = `USER QUESTION: ${userQuestion}\nDescribe what you see accurately and CONCISELY — 2-3 sentences maximum.`;
-  let lastError = "";
-  for (const modelName of modelNames) {
-    try {
-      const model = genAI.getGenerativeModel({ model: modelName });
-      const result = await model.generateContent([visionPrompt, { inlineData: { data: base64Image, mimeType: "image/jpeg" } }]);
-      return (await result.response).text();
-    } catch (e: any) { lastError = e.message; continue; }
-  }
-  throw new Error("All vision models failed. Last error: " + lastError);
-}
+// Keep all your other functions (synthesizeResponses, speechToText, textToSpeech, search functions, verifyClaim, etc.) unchanged
 
 export async function POST(req: Request) {
   try {
@@ -336,168 +53,8 @@ export async function POST(req: Request) {
     const { messages, conversationId, autoVerify = false, imageBase64, mode, audioBase64, enableTTS = false } = body;
 
     let userPrompt = messages[messages.length - 1].content;
-    const lowerPrompt = userPrompt.toLowerCase();
 
-    if (mode === "voice" && audioBase64) {
-      try { const transcript = await speechToText(audioBase64); if (transcript) userPrompt = transcript; } catch (e: any) { console.error("STT failed:", e.message); }
-    }
-
-    let convId = conversationId;
-    if (!convId) {
-      const nc = await prisma.conversation.create({ data: { userId: session.user.id, title: userPrompt.substring(0, 30) + "..." } });
-      convId = nc.id;
-    }
-    await prisma.message.create({ data: { conversationId: convId, role: "user", content: userPrompt } });
-
-    if (mode === "live" && imageBase64) {
-      const enc = new TextEncoder();
-      const stream = new ReadableStream({
-        async start(ctrl) {
-          let analysis = "";
-          try {
-            ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ status: " Analyzing what I see..." })}\n\n`));
-            analysis = await analyzeImageWithGemini(imageBase64, userPrompt);
-            const p1 = { choices: [{ delta: { content: analysis } }] };
-            ctrl.enqueue(enc.encode(`data: ${JSON.stringify(p1)}\n\n`));
-          } catch (e: any) {
-            analysis = "*(Vision analysis failed: " + e.message + ")*";
-            const p2 = { choices: [{ delta: { content: analysis } }] };
-            ctrl.enqueue(enc.encode(`data: ${JSON.stringify(p2)}\n\n`));
-          }
-          try {
-            ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ status: "🔊 Generating voice..." })}\n\n`));
-            const audio = await textToSpeech(analysis.replace(/[*#_`]/g, "").substring(0, 500));
-            if (audio) ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ audioBase64: audio })}\n\n`));
-          } catch (e: any) { ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ status: "🔇 Voice unavailable" })}\n\n`)); }
-          ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ conversationId: convId })}\n\n`));
-          ctrl.enqueue(enc.encode("data: [DONE]\n\n"));
-          ctrl.close();
-          try { await prisma.message.create({ data: { conversationId: convId, role: "assistant", content: analysis } }); await prisma.conversation.update({ where: { id: convId }, data: { updatedAt: new Date() } }); } catch (e) { console.error("DB error:", e); }
-        },
-      });
-      return new Response(stream, { headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no" } });
-    }
-
-    // Small talk: short greetings/pleasantries shouldn't trigger live search or
-    // the ### heading / bullet formatting rules — they read as absurd for "hi".
-    const SMALL_TALK_RE = /^(hi|hello|hey|yo|sup|hiya|howdy|good\s?morning|good\s?evening|good\s?night|goodnight|how\s?are\s?you|how'?s\s?it\s?going|what'?s\s?up|whats\s?up|thanks?|thank\s?you|thanks?\s?a\s?lot|ok|okay|cool|nice|great|lol|haha|bye|goodbye|see\s?you|see\s?ya|good\s?day)[\s!.,?]*$/i;
-    const isSmallTalk = userPrompt.trim().length <= 40 && SMALL_TALK_RE.test(userPrompt.trim());
-
-    const isCoding = !isSmallTalk && (lowerPrompt.includes("code") || lowerPrompt.includes("algorithm") || lowerPrompt.includes("function") || lowerPrompt.includes("write a") || lowerPrompt.includes("array") || lowerPrompt.includes("tree"));
-
-    if (isSmallTalk) {
-      const enc = new TextEncoder();
-      const CASUAL_SYSTEM = `You are Noctryx AI, a friendly assistant. The user just sent a short conversational message (a greeting, thanks, or similar small talk).
-Reply naturally and briefly — like a real conversation, not a report.
-Do NOT use headings (###), bullet points, or bold formatting for this kind of message.
-Do NOT explain the etymology or history of common words/phrases.
-Keep it to 1-2 short sentences.
-ONLY mention your identity (Noctryx AI, built by Lewis Einstein) if explicitly asked "who are you" or similar.`;
-      const stream = new ReadableStream({
-        async start(ctrl) {
-          let chatTxt = "";
-          try {
-            const { result } = await callSingleAI([{ role: "system", content: CASUAL_SYSTEM }, { role: "user", content: userPrompt }], 0.7, 100);
-            for await (const d of result.textStream) {
-              chatTxt += d;
-              ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: d } }] })}\n\n`));
-            }
-          } catch (e: any) {
-            console.error("Small talk error:", e);
-            chatTxt = "Hey! How can I help you today?";
-            ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: chatTxt } }] })}\n\n`));
-          }
-          ctrl.enqueue(enc.encode("data: [DONE]\n\n"));
-          ctrl.close();
-          try {
-            await prisma.message.create({ data: { conversationId: convId, role: "assistant", content: chatTxt } });
-            await prisma.conversation.update({ where: { id: convId }, data: { updatedAt: new Date() } });
-          } catch (e) { console.error("DB error:", e); }
-        },
-      });
-      return new Response(stream, { headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no" } });
-    }
-
-    if (isCoding) {
-      const enc = new TextEncoder();
-      const MAX_ROUNDS = 3;
-      const CODING_PROMPT = `You are an elite software engineer. 
-CRITICAL RULES:
-- ONLY write analysis and code.
-- When handling Unicode strings, use Intl.Segmenter with granularity: "grapheme". Array.from() and string[i] break emoji sequences.
-Your response MUST have exactly 2 sections:
-**SECTION 1: ANALYSIS** (Briefly analyze inputs/outputs/constraints, algorithm choice, time/space complexity)
-**SECTION 2: CODE** (Write a complete JavaScript solution as a single named function, with one console.log test case at the bottom)`;
-
-      const stream = new ReadableStream({
-        async start(ctrl) {
-          const sendStatus = (msg: string) => ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ status: msg })}\n\n`));
-          let full = "";
-          let convoMessages = messages.slice(-4).map((m: any) => ({ role: m.role === "assistant" ? "assistant" : "user", content: m.content.includes("data:image") ? "[Image]" : m.content }));
-          let round = 0;
-
-          try {
-            for (round = 1; round <= MAX_ROUNDS; round++) {
-              sendStatus(round === 1 ? "🧠 Thinking... writing a solution" : `🔁 Round ${round}/${MAX_ROUNDS}: fixing the real error found and retrying`);
-              const { result, providerName } = await callSingleAI([{ role: "system", content: CODING_PROMPT }, ...convoMessages], 0.2, 1500);
-              let roundText = "";
-              for await (const d of result.textStream) roundText += d;
-
-              const code = extractCode(roundText);
-              if (!code) {
-                sendStatus("⚠️ No code block produced, asking again...");
-                convoMessages.push({ role: "assistant", content: roundText });
-                convoMessages.push({ role: "user", content: "Provide a JavaScript code block wrapped in triple backticks now." });
-                continue;
-              }
-
-              sendStatus("🔎 Verifying in the real sandbox...");
-              const execResult = await executeJs(code);
-
-              if (execResult.unavailable) { full = roundText + `\n\n⚠️ **Could not verify — the execution sandbox is temporarily unavailable.** (${execResult.stderr})`; break; }
-              if (execResult.ok) { full = roundText + `\n\n✅ **Code executed without errors** (via ${providerName}, round ${round}/${MAX_ROUNDS}) — output: \`${execResult.stdout || "(no output)"}\`.`; break; }
-
-              full = roundText;
-              convoMessages.push({ role: "assistant", content: roundText });
-              convoMessages.push({ role: "user", content: `Your code failed when executed. Real error:\n\n${execResult.stderr}\n\nFix it. Follow the exact same format.` });
-              if (round === MAX_ROUNDS) full += `\n\n⚠️ **Still failing after ${MAX_ROUNDS} attempts.** Last error: \`${execResult.stderr}\``;
-            }
-            const successPayload = { choices: [{ delta: { content: full } }] };
-            ctrl.enqueue(enc.encode(`data: ${JSON.stringify(successPayload)}\n\n`));
-          } catch (e: any) {
-            console.error("Coding loop error:", e);
-            const errorPayload = { choices: [{ delta: { content: "*(AI providers unavailable: " + (e.message || e) + ")*" } }] };
-            ctrl.enqueue(enc.encode(`data: ${JSON.stringify(errorPayload)}\n\n`));
-          } finally {
-            ctrl.enqueue(enc.encode("data: [DONE]\n\n"));
-            ctrl.close();
-            try { await prisma.message.create({ data: { conversationId: convId, role: "assistant", content: full } }); await prisma.conversation.update({ where: { id: convId }, data: { updatedAt: new Date() } }); } catch (e) { console.error("DB error:", e); }
-          }
-        },
-      });
-      return new Response(stream, { headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no" } });
-    }
-
-    const SYSTEM = `You are Noctryx AI, developed by **Lewis Einstein**, an AI/ML Engineer at **Kibabii University**, launched in **July 2026**.
-
-IDENTITY RULE:
-- ONLY mention your identity when the user EXPLICITLY asks "who are you?", "who built you?", or "when were you created".
-- For ALL OTHER QUESTIONS, DO NOT introduce yourself. Just answer the question directly.
-
-⚠️ CRITICAL FORMATTING RULES - YOU MUST FOLLOW THESE EXACTLY:
-1. HEADINGS: Every section title MUST start with ### (three hash symbols and a space)
-2. BULLET POINTS: Every list item MUST start with - (dash and space)
-3. BOLD TEXT: All key terms MUST be wrapped in **double asterisks**
-4. PARAGRAPHS: Maximum 2-3 sentences per paragraph.
-
-EXAMPLE OF CORRECT FORMATTING:
-### Section Title
-Short paragraph here.
-
-- **Bold Term**: Explanation here.
-- **Another Term**: Explanation here.
-
-If no live search results are available, you MUST explicitly say "I'm not certain" rather than fabricating an answer.`;
+    // ... (keep your voice mode, conversation creation, small talk detection, coding mode unchanged)
 
     const enc = new TextEncoder();
     const stream = new ReadableStream({
@@ -507,111 +64,45 @@ If no live search results are available, you MUST explicitly say "I'm not certai
 
         try {
           sendStatus("🔎 Searching live sources...");
-          let tavily = null, wiki = null, ddg = null, hn = null, so = null, gh = null, arxiv = null;
-          try {
-            [tavily, wiki, ddg, hn, so, gh, arxiv] = await Promise.all([
-              searchTavily(userPrompt), searchWiki(userPrompt), searchDdg(userPrompt), searchHn(userPrompt), searchSo(userPrompt), searchGh(userPrompt), searchArxiv(userPrompt)
-            ]);
-          } catch (e) { console.error("Search batch failed:", e); }
 
-          let searchCtx = "";
-          if (tavily) searchCtx += `[Tavily] ${truncate(tavily, 300)}\n\n`;
-          if (wiki) searchCtx += `[Wikipedia] ${truncate(wiki, 200)}\n\n`;
-          if (ddg) searchCtx += `[DuckDuckGo] ${truncate(ddg, 200)}\n\n`;
-          if (hn) searchCtx += `[Hacker News] ${truncate(hn, 150)}\n\n`;
-          if (so) searchCtx += `[StackOverflow] ${truncate(so, 150)}\n\n`;
-          if (gh) searchCtx += `[GitHub] ${truncate(gh, 150)}\n\n`;
-          if (arxiv) searchCtx += `[arXiv] ${truncate(arxiv, 150)}\n\n`;
+          // URL detection and fetching
+          const urlRegex = /(https?:\/\/[^\s]+)/g;
+          const urls = userPrompt.match(urlRegex) || [];
+          let linkContext = "";
 
-          const hasSearchResults = searchCtx.length > 0;
-          if (hasSearchResults) sendStatus("🔎 Found live sources, enhancing answer...");
-
-          const systemWithSearch = hasSearchResults ? `${SYSTEM}\n\n---\nLIVE SEARCH RESULTS:\n\n${searchCtx}` : SYSTEM;
-
-          sendStatus("🧠 Accessing AI brain...");
-          const aiMessages = [{ role: "system", content: systemWithSearch }, ...messages.slice(-6).map((m: any) => ({ role: m.role === "assistant" ? "assistant" : "user", content: m.content.includes("data:image") ? "[Image]" : m.content }))];
-
-          // Safety net: if ensemble fails, fall back to single AI
-          let aiResponses: string[] = [];
-          try {
-            sendStatus("🔄 Querying multiple AI models...");
-            const ensembleResult = await callAllAI(aiMessages, 0.5, 2000);
-            aiResponses = ensembleResult.responses;
-          } catch (ensembleErr: any) {
-            console.error("Ensemble failed, falling back to single AI:", ensembleErr.message);
-            sendStatus("⚠️ Ensemble failed, using single AI fallback...");
-            const { result } = await callSingleAI(aiMessages, 0.5, 2000);
-            let fallbackText = "";
-            for await (const d of result.textStream) fallbackText += d;
-            aiResponses = [fallbackText];
+          if (urls.length > 0) {
+            sendStatus(`🌐 Opening ${urls.length} link(s)...`);
+            for (const url of urls) {
+              const pageContent = await fetchWebpage(url);
+              linkContext += `\n\n[LINK CONTENT FROM \( {url}]\n \){pageContent}\n`;
+            }
           }
 
-          sendStatus("🔄 Synthesizing best answer...");
-          chatTxt = await synthesizeResponses(aiResponses, userPrompt, searchCtx);
+          // ... keep your existing searchCtx logic
 
-          const words = chatTxt.split(" ");
-          for (const word of words) {
-            const wordPayload = { choices: [{ delta: { content: word + " " } }] };
-            ctrl.enqueue(enc.encode(`data: ${JSON.stringify(wordPayload)}\n\n`));
-          }
+          const fullContext = searchCtx + linkContext;
+          const systemWithContext = fullContext ? `\( {SYSTEM}\n\n---\nLIVE DATA:\n \){fullContext}` : SYSTEM;
+
+          // ... rest of your AI calling, synthesis, streaming, verification, TTS logic unchanged
+
         } catch (e: any) {
           console.error("Chat error:", e);
-          chatTxt = `*(AI response unavailable. Error: ${e.message}. Please try again.)*`;
-          const fallbackPayload = { choices: [{ delta: { content: chatTxt } }] };
-          ctrl.enqueue(enc.encode(`data: ${JSON.stringify(fallbackPayload)}\n\n`));
+          chatTxt = `*(Error: ${e.message})*`;
+        } finally {
+          // your DB save logic
         }
-
-        try {
-          const claims = extractClaims(chatTxt);
-          const hasHighStakesClaims = claims.some(c => c.type === "price" || c.type === "citation" || (c.type === "percentage" && /approval|probability|chance|rate/i.test(c.text)));
-
-          if (autoVerify || hasHighStakesClaims) {
-            sendStatus(" Checking claims against live sources...");
-            const results = await Promise.all(claims.slice(0, 5).map(c => verifyClaim(c)));
-            const verificationFooter = buildVerificationFooter(results);
-            if (verificationFooter) {
-              const footerPayload = { choices: [{ delta: { content: verificationFooter } }] };
-              ctrl.enqueue(enc.encode(`data: ${JSON.stringify(footerPayload)}\n\n`));
-              chatTxt += verificationFooter;
-            }
-          }
-        } catch (e) { console.error("Verification error:", e); }
-
-        if ((mode === "voice" || enableTTS) && chatTxt) {
-          try {
-            sendStatus("🔊 Generating voice response...");
-            const audioBase64Out = await textToSpeech(chatTxt.replace(/[*#_`]/g, "").substring(0, 1000));
-            if (audioBase64Out) {
-              const audioPayload = { audioBase64: audioBase64Out };
-              ctrl.enqueue(enc.encode(`data: ${JSON.stringify(audioPayload)}\n\n`));
-            }
-          } catch (e: any) { console.error("TTS failed:", e.message); }
-        }
-
-        ctrl.enqueue(enc.encode("data: [DONE]\n\n"));
-        ctrl.close();
-
-        try {
-          const lt = chatTxt.toLowerCase();
-          if ((lt.includes("action:create_flashcard") || (lowerPrompt.includes("create") && lowerPrompt.includes("flashcard"))) && !chatTxt.includes("[SAVED:FLASHCARD]")) {
-            const m = chatTxt.match(/Front:\s*(.*?)\s*\|\s*Back:\s*(.*)/i);
-            if (m) { await prisma.flashcard.create({ data: { front: m[1].trim(), back: m[2].trim(), userId: session.user.id } }); chatTxt += "\n[SAVED:FLASHCARD]"; }
-          } else if ((lt.includes("action:save_note") || (lowerPrompt.includes("save") && lowerPrompt.includes("note"))) && !chatTxt.includes("[SAVED:NOTE]")) {
-            const m = chatTxt.match(/Title:\s*(.*?)\s*\|\s*Content:\s*(.*)/i);
-            if (m) { await prisma.note.create({ data: { title: m[1].trim(), content: m[2].trim(), userId: session.user.id } }); chatTxt += "\n[SAVED:NOTE]"; }
-          } else if ((lt.includes("action:create_assignment") || (lowerPrompt.includes("add") && lowerPrompt.includes("assignment"))) && !chatTxt.includes("[SAVED:ASSIGNMENT]")) {
-            const m = chatTxt.match(/Title:\s*(.*?)\s*\|\s*Due:\s*(.*)/i);
-            if (m) { const dd = new Date(m[2].trim()); if (!isNaN(dd.getTime())) { await prisma.assignment.create({ data: { title: m[1].trim(), dueDate: dd, userId: session.user.id } }); chatTxt += "\n[SAVED:ASSIGNMENT]"; } }
-          }
-          await prisma.message.create({ data: { conversationId: convId, role: "assistant", content: chatTxt } });
-          await prisma.conversation.update({ where: { id: convId }, data: { updatedAt: new Date() } });
-        } catch (e) { console.error("DB error:", e); }
       },
     });
 
-    return new Response(stream, { headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no" } });
+    return new Response(stream, { 
+      headers: { 
+        "Content-Type": "text/event-stream", 
+        "Cache-Control": "no-cache", 
+        "Connection": "keep-alive" 
+      } 
+    });
   } catch (error: any) {
     console.error("API Error:", error);
-    return new Response(JSON.stringify({ error: "Internal Server Error", details: error.message }), { status: 500 });
+    return new Response(JSON.stringify({ error: "Internal Server Error" }), { status: 500 });
   }
 }
